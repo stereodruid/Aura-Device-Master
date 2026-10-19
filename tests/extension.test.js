@@ -74,6 +74,17 @@ test("all selectable regions can display extension images", () => {
   for (const host of manifest.host_permissions)
     assert(manifest.web_accessible_resources[0].matches.includes(host));
 });
+test("manifest requests only the permissions used by the extension", () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      new URL("../chrome-extension/manifest.json", import.meta.url),
+    ),
+  );
+  assert.deepEqual(manifest.permissions, ["scripting"]);
+  assert.equal(manifest.permissions.includes("tabs"), false);
+  assert.equal(manifest.permissions.includes("activeTab"), false);
+  assert(manifest.host_permissions.every((host) => /amazon\.(?:de|com|co\.uk|fr|it|es|ca|com\.au|co\.jp|in|com\.br|com\.mx)\//.test(host)));
+});
 test("background injects once even if load events repeat", async () => {
   const f = fixture();
   f.open("amazon.de");

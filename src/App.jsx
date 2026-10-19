@@ -64,6 +64,7 @@ import {
   DoorClosed,
   TreePine,
   AudioLines,
+  Pencil,
 } from "lucide-react";
 import { useAlexa } from "./hooks/useAlexa";
 import { deviceVisual } from "./deviceVisual";
@@ -302,9 +303,11 @@ export default function App() {
     ready,
     loadedAt,
     logs,
+    progress,
     logger,
     fetchDevices,
     execute,
+    cancelBatch,
   } = useAlexa(language);
   const [filters, setFilters] = useState({
     ...emptyFilters,
@@ -484,9 +487,16 @@ export default function App() {
       logger(t("backupFailed"));
     }
   }
-  function preview(action, list = checked) {
+  function preview(action, list = checked, extra = {}) {
     if (busy || !ready || !list.length) return;
-    setPlan({ action, list: [...list], text: speech, locale: language === "de" ? "de-DE" : "en-US" });
+    setPlan({
+      action,
+      list: [...list],
+      text: speech,
+      locale: language === "de" ? "de-DE" : "en-US",
+      groupName:
+        extra.groupName ?? (action === "groupRename" ? deviceName(list[0]) : ""),
+    });
     setBackedUp(false);
     setProtectedIds(new Set());
     setConfirmation("");
@@ -509,6 +519,7 @@ export default function App() {
       !ready ||
       busy ||
       (!isVoiceAction(plan.action) && !backedUp) ||
+      (["groupCreate", "groupRename"].includes(plan.action) && !plan.groupName?.trim()) ||
       plan.list.some(
         (d) => !isVoiceAction(plan.action) && !canAct(d, plan.action),
       ) ||
@@ -522,6 +533,7 @@ export default function App() {
       allowProtectedIds: [...protectedIds],
       text: plan.text,
       locale: plan.locale,
+      groupName: plan.groupName,
     });
     setPlan(null);
     if (ok) {
@@ -537,6 +549,7 @@ export default function App() {
     delete: t("permanentDelete"), enable: t("enable"), disable: t("disable"),
     on: t("powerOn"), off: t("powerOff"), speak: t("speak"),
     announce: t("announce"), command: t("command"),
+    groupCreate: t("createGroup"), groupRename: t("renameGroup"),
   };
   return (
     <div className="aura-app">
@@ -764,6 +777,12 @@ export default function App() {
               {hiddenCount > 0 && t("outsidePage", { count: hiddenCount })}
             </span>
             <div className="toolbar">
+              <button
+                disabled={!filtered.length || busy}
+                onClick={() => setCheckedIds(new Set(filtered.map((device) => device.id)))}
+              >
+                {t("selectAllFiltered", { count: filtered.length })}
+              </button>
               <label>
                 {t("perPage")}{" "}
                 <select
@@ -852,6 +871,16 @@ export default function App() {
                 >
                   <Trash2 size={20} />
                 </button>
+                {isGroup(selected) && (
+                  <button
+                    title={t("renameGroup")}
+                    aria-label={t("renameGroup")}
+                    disabled={blocked || !canAct(selected, "groupRename")}
+                    onClick={() => preview("groupRename", [selected])}
+                  >
+                    <Pencil size={20} />
+                  </button>
+                )}
                 <span className="toolbar-divider" />
                 <button
                   className="on-icon"
@@ -913,6 +942,12 @@ export default function App() {
                 >
                   {canAct(selected, "delete") ? t("yes") : t("no")}
                 </dd>
+                {selected._admDeleteUnavailable && (
+                  <>
+                    <dt>{t("deleteStatus")}</dt>
+                    <dd className="status-offline">{t("deleteUnavailable")}</dd>
+                  </>
+                )}
                 <dt>{t("protected")}</dt>
                 <dd>
                   {isProtected(selected)
@@ -1081,6 +1116,12 @@ export default function App() {
           </button>
           <button
             disabled={blocked || !checked.length}
+            onClick={() => preview("groupCreate")}
+          >
+            <Layers size={16} /> {t("createGroup")}
+          </button>
+          <button
+            disabled={blocked || !checked.length}
             onClick={() => preview("enable")}
           >
             {t("enable")}
@@ -1100,6 +1141,13 @@ export default function App() {
           </button>
         </div>
         <div className="selection-summary">
+          {progress && (
+            <div className="batch-progress" role="status">
+              <progress max={progress.total} value={progress.completed} />
+              <span>{t("batchProgress", progress)}</span>
+              <button onClick={cancelBatch}>{t("cancelQueue")}</button>
+            </div>
+          )}
           <strong>{t("selectedCount", { count: checked.length })}</strong>
           <small className="block muted">
             {t("dataAsOf")}: {loadedAt ? loadedAt.toLocaleString(language === "de" ? "de-DE" : "en-US") : t("notLoaded")} · {t("sourceEstimate")}
@@ -1120,7 +1168,7 @@ export default function App() {
             </p>
             {isVoiceAction(plan.action) && <blockquote>{plan.text}</blockquote>}
             <div className="plan-list">
-              {plan.list.map((d) => (
+              {plan.list.slice(0, 100).map((d) => (
                 <div className="plan-item" key={d.id}>
                   <strong>{deviceName(d)}</strong>
                   <code>{d._admEndpointId || d._admApplianceId || d.id}</code>
@@ -1149,7 +1197,25 @@ export default function App() {
                   )}
                 </div>
               ))}
+              {plan.list.length > 100 && (
+                <div className="plan-item muted">
+                  {t("moreTargets", { count: plan.list.length - 100 })}
+                </div>
+              )}
             </div>
+            {["groupCreate", "groupRename"].includes(plan.action) && (
+              <label className="group-name-field">
+                {t("groupName")}
+                <input
+                  value={plan.groupName}
+                  maxLength={100}
+                  placeholder={t("groupNamePlaceholder")}
+                  onChange={(event) =>
+                    setPlan((current) => ({ ...current, groupName: event.target.value }))
+                  }
+                />
+              </label>
+            )}
             {!isVoiceAction(plan.action) && (
               <>
                 <button onClick={exportJson}>
@@ -1180,11 +1246,15 @@ export default function App() {
               <button autoFocus disabled={busy} onClick={() => setPlan(null)}>
                 {t("cancel")}
               </button>
+              {progress && (
+                <button onClick={cancelBatch}>{t("cancelQueue")}</button>
+              )}
               <button
                 className={plan.action === "delete" ? "danger" : "primary"}
                 disabled={
                   blocked ||
                   (!isVoiceAction(plan.action) && !backedUp) ||
+                  (["groupCreate", "groupRename"].includes(plan.action) && !plan.groupName?.trim()) ||
                   plan.list.some(
                     (d) => !isVoiceAction(plan.action) && !canAct(d, plan.action),
                   ) ||

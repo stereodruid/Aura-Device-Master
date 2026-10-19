@@ -10,7 +10,9 @@ export function useAlexa(language = "de") {
   const [ready, setReady] = useState(false);
   const [loadedAt, setLoadedAt] = useState(null);
   const [logs, setLogs] = useState([{ text: tr(language, "cliReady"), level: "info" }]);
+  const [progress, setProgress] = useState(null);
   const lock = useRef(false);
+  const cancelRequested = useRef(false);
   const latest = useRef([]);
   const readyRef = useRef(false);
   const logger = useCallback(
@@ -81,6 +83,7 @@ export function useAlexa(language = "de") {
       return false;
     }
     lock.current = true;
+    cancelRequested.current = false;
     setBusy(true);
     setError(null);
     try {
@@ -96,11 +99,51 @@ export function useAlexa(language = "de") {
         );
         return true;
       }
+      if (["groupCreate", "groupRename"].includes(action)) {
+        const name = String(approval?.groupName || "").trim();
+        if (!name) throw new Error(tr(language, "groupNameRequired"));
+        if (action === "groupCreate") {
+          await client.createGroup(name, current.map((device) => device._admEndpointId));
+          logger(tr(language, "groupCreated", { name, count: current.length }));
+        } else {
+          if (current.length !== 1 || !current[0]._admGroupId)
+            throw new Error(tr(language, "exactlyOneGroup"));
+          await client.renameGroup(current[0]._admGroupId, name);
+          logger(tr(language, "groupRenamed", { name }));
+        }
+        publish(await client.load());
+        return true;
+      }
       const outcome = await runBatch(client, current, action, {
         allowProtectedIds: approval.allowProtectedIds,
         logger: (message, level) => logger(localizeMessage(language, message), level),
+        onProgress: setProgress,
+        shouldCancel: () => cancelRequested.current,
       });
-      if (outcome.devices) publish(outcome.devices);
+      const unavailable = new Set(
+        outcome.results
+          .filter((result) => result.errorCode === "NO_SAFE_DELETE_ID")
+          .map((result) => result.device.id),
+      );
+      if (outcome.devices)
+        publish(
+          outcome.devices.map((device) =>
+            unavailable.has(device.id)
+              ? { ...device, _admDeleteUnavailable: true }
+              : device,
+          ),
+        );
+      else if (unavailable.size) {
+        const marked = latest.current.map((device) =>
+          unavailable.has(device.id)
+            ? { ...device, _admDeleteUnavailable: true }
+            : device,
+        );
+        latest.current = marked;
+        setDevices(marked);
+      }
+      if (outcome.cancelled)
+        logger(tr(language, "batchCancelled"), "error");
       if (!outcome.verified) {
         readyRef.current = false;
         setReady(false);
@@ -109,7 +152,7 @@ export function useAlexa(language = "de") {
         );
       }
       const failed = outcome.results.filter((r) => !r.success);
-      for (const r of failed)
+      for (const r of failed.filter((result) => !result.skipped))
         logger(
           `${deviceName(r.device)}: ${r.error ? localizeMessage(language, r.error) : tr(language, "targetNotReached")}`,
           "error",
@@ -128,7 +171,14 @@ export function useAlexa(language = "de") {
     } finally {
       lock.current = false;
       setBusy(false);
+      setProgress(null);
+      cancelRequested.current = false;
     }
+  };
+  const cancelBatch = () => {
+    if (!lock.current) return;
+    cancelRequested.current = true;
+    logger(tr(language, "batchCancelRequested"));
   };
   return {
     devices,
@@ -137,8 +187,10 @@ export function useAlexa(language = "de") {
     ready,
     loadedAt,
     logs,
+    progress,
     logger,
     fetchDevices,
     execute,
+    cancelBatch,
   };
 }

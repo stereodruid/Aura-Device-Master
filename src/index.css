@@ -595,6 +595,23 @@
   margin-right: 414px;
   text-align: right;
 }
+#aura-root .batch-progress {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-size: 12px;
+}
+#aura-root .batch-progress progress {
+  width: 140px;
+  accent-color: #00a3ff;
+}
+#aura-root .group-name-field {
+  display: grid;
+  gap: 6px;
+  font-weight: 700;
+}
 #aura-root .footer-actions {
   justify-content: flex-start;
 }

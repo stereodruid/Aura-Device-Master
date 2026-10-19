@@ -12,6 +12,8 @@ import {
   isProtected,
   isEcho,
   isMissingResourceError,
+  attachDeviceGroups,
+  canAct,
 } from "../src/alexa.js";
 
 test("Echo recognition supports top-level types and GraphQL categories", () => {
@@ -152,10 +154,11 @@ test("missing GraphQL resource without a legacy ID gives an actionable error", a
   const client = createAlexaClient(async () =>
     response({ errors: [{ message: "Endpoint not found" }] }),
   );
-  await assert.rejects(
-    client.mutate({ ...d, _admApplianceId: null }, "delete"),
-    /keine löschbare Ressource.*Legacy-ID/i,
-  );
+  await assert.rejects(client.mutate({ ...d, _admApplianceId: null }, "delete"), (error) => {
+    assert.match(error.message, /keine löschbare Ressource.*Legacy-ID/i);
+    assert.equal(error.code, "NO_SAFE_DELETE_ID");
+    return true;
+  });
   assert.equal(isMissingResourceError(Error("Resource does not exist")), true);
   assert.equal(isMissingResourceError(Error("Permission denied")), false);
 });
@@ -239,6 +242,90 @@ test("duplicate endpoint targets are executed once", async () => {
     { delay: noDelay },
   );
   assert.equal(calls, 1);
+});
+test("batch reports progress and stops safely between requests", async () => {
+  let cancel = false;
+  let calls = 0;
+  const updates = [];
+  const second = { ...d, id: "second", _admEndpointId: "ep-2" };
+  const result = await runBatch(
+    {
+      mutate: async () => {
+        calls++;
+        cancel = true;
+      },
+      load: async () => [],
+    },
+    [d, second],
+    "delete",
+    {
+      delay: noDelay,
+      shouldCancel: () => cancel,
+      onProgress: (progress) => updates.push(progress),
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.results[1].skipped, true);
+  assert.deepEqual(updates.at(-1), { completed: 1, total: 2, current: "Lampe" });
+});
+test("groups are attached by a unique name and use explicit group IDs", () => {
+  const group = {
+    id: "behavior-group",
+    displayName: "Living Room",
+    providerData: { categoryType: "GROUP" },
+  };
+  const attached = attachDeviceGroups([group], [
+    {
+      id: "amzn1.alexa.endpointGroup.room",
+      friendlyName: { value: { text: "Living Room" } },
+      memberDevices: { items: [{ id: "ep-1" }] },
+    },
+  ])[0];
+  assert.equal(attached._admGroupId, "amzn1.alexa.endpointGroup.room");
+  assert.deepEqual(attached._admGroupMemberEndpointIds, ["ep-1"]);
+  assert.equal(canAct(attached, "groupRename"), true);
+});
+test("group creation and rename send modern GraphQL inputs and verify by reread", async () => {
+  const sent = [];
+  let name = "Living Room";
+  let created = false;
+  const client = createAlexaClient(async (_url, options) => {
+    const request = JSON.parse(options.body);
+    sent.push(request);
+    if (request.operationName === "createDeviceGroup") {
+      created = true;
+      return response({ data: { createDeviceGroup: { __typename: "CreateDeviceGroupResponse" } } });
+    }
+    if (request.operationName === "setEndpointFriendlyName") {
+      name = request.variables.in.friendlyName;
+      return response({ data: { setEndpointFriendlyName: { __typename: "SetEndpointFriendlyNameResponse" } } });
+    }
+    return response({
+      data: {
+        listDeviceGroups: {
+          deviceGroups: created ? [{
+            id: "group-1",
+            friendlyName: { value: { text: name } },
+            memberDevices: { items: [{ id: "ep-1" }] },
+          }] : [],
+        },
+      },
+    });
+  });
+  await client.createGroup("Living Room", ["ep-1"]);
+  await client.renameGroup("group-1", "Lounge");
+  const create = sent.find((entry) => entry.operationName === "createDeviceGroup");
+  assert.deepEqual(create.variables.in, {
+    friendlyName: "Living Room",
+    memberDeviceIds: ["ep-1"],
+  });
+  assert.equal("associatedUnitIds" in create.variables.in, false);
+  const rename = sent.find((entry) => entry.operationName === "setEndpointFriendlyName");
+  assert.deepEqual(rename.variables.in, {
+    endpointId: "group-1",
+    friendlyName: "Lounge",
+  });
 });
 test("unknown reachability is not offline and modern state takes precedence", () => {
   assert.equal(reachability({}), "Unbekannt");

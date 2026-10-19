@@ -65,6 +65,10 @@ const { chromium } = require(process.env.AURA_PLAYWRIGHT || "playwright");
             ? route.fulfill({ status: 403, json: {} })
             : route.fulfill({ json: { data: { allDevices: { endpoints } } } });
         }
+        if (body.operationName === "listDeviceGroups")
+          return route.fulfill({
+            json: { data: { listDeviceGroups: { deviceGroups: [] } } },
+          });
         mutations++;
         if (body.operationName === "setEndpointEnablement") {
           const d = endpoints.find(
@@ -159,7 +163,7 @@ const { chromium } = require(process.env.AURA_PLAYWRIGHT || "playwright");
       const sidebar = document.querySelector('.sidebar');
       const log = sidebar.querySelector('.log > div');
       const name = sidebar.querySelector('.detail-heading h2').getBoundingClientRect();
-      const picture = sidebar.querySelector('.detail-heading img').getBoundingClientRect();
+      const picture = sidebar.querySelector('.detail-heading .device-art').getBoundingClientRect();
       const before = sidebar.getBoundingClientRect().height; const originalCount = log.children.length;
       for(let i=0;i<30;i++) { const p=document.createElement('p'); p.textContent='Layout-Test '+i; log.appendChild(p); }
       const footer = document.querySelector('.action-footer');

@@ -1,6 +1,6 @@
 # Aura Device Master
 
-[![Release](https://img.shields.io/badge/release-v0.7.1-00a3ff)](https://github.com/stereodruid/Aura-Device-Master/releases/tag/v0.7.1)
+[![Release](https://img.shields.io/badge/release-v0.8.0-00a3ff)](https://github.com/stereodruid/Aura-Device-Master/releases/tag/v0.8.0)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-00d48a)](LICENSE)
 
 [![Install Aura Device Master from the Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-Install_Aura_Device_Master-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/aura-device-master/ebfopagpcecfbmodklhlafplpdlohfgc)
@@ -26,6 +26,8 @@ A free, local Chrome extension for viewing and safely managing Alexa smart-home 
 
 - German and English interface with a persistent language selector.
 - Search, filters, groups, pagination and draggable table/KPI layouts.
+- Create groups from selected devices and rename existing groups with a verified GraphQL reread.
+- Select every filtered result and process large device sets in a visible, stoppable queue.
 - Clear device details with category-specific visuals instead of misleading product images.
 - Enable, disable and permanently remove supported Alexa endpoints.
 - Safe deletion preview, JSON backup requirement and per-device protection controls.
@@ -39,9 +41,9 @@ A free, local Chrome extension for viewing and safely managing Alexa smart-home 
 
 This is the recommended installation method. Chrome installs updates automatically. Aura Device Master is completely free and has no subscriptions.
 
-## Manual installation of v0.7.1
+## Manual installation of v0.8.0
 
-1. Download [Aura Device Master v0.7.1](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.7.1/Aura-Device-Master-v0.7.1.zip).
+1. Download [Aura Device Master v0.8.0](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.8.0/Aura-Device-Master-v0.8.0.zip).
 2. Extract the ZIP file to a permanent folder.
 3. Open `chrome://extensions/` in Chrome.
 4. Enable **Developer mode**.
@@ -116,9 +118,9 @@ Aura Device Master ist eine kostenlose, lokale Chrome-Erweiterung zur Anzeige un
 
 Das ist der empfohlene Installationsweg. Chrome installiert Aktualisierungen automatisch. Aura Device Master bleibt vollständig kostenlos und enthält keine Abos.
 
-### Manuelle Installation von v0.7.1
+### Manuelle Installation von v0.8.0
 
-1. [Aura Device Master v0.7.1 herunterladen](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.7.1/Aura-Device-Master-v0.7.1.zip).
+1. [Aura Device Master v0.8.0 herunterladen](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.8.0/Aura-Device-Master-v0.8.0.zip).
 2. ZIP-Datei dauerhaft entpacken.
 3. `chrome://extensions/` öffnen und den **Entwicklermodus** aktivieren.
 4. **Entpackte Erweiterung laden** wählen und den entpackten Ordner mit `manifest.json` auswählen.
@@ -130,6 +132,8 @@ Beim Aktualisieren die Dateien ersetzen, die Erweiterung unter `chrome://extensi
 
 - Die Oberfläche lässt sich vollständig zwischen Deutsch und Englisch umschalten.
 - Suche, Filter, Gruppen und Status helfen beim Prüfen großer Gerätelisten.
+- Aus einer Geräteauswahl lassen sich Alexa-Gruppen erstellen; vorhandene Gruppen können mit Nachkontrolle umbenannt werden.
+- Alle gefilterten Treffer können gesammelt ausgewählt und in einer sichtbaren, stoppbaren Warteschlange verarbeitet werden.
 - Für die Gerätetypen werden eindeutige Symbole statt möglicherweise falscher Produktbilder verwendet.
 - Vor Änderungen zeigt die App alle Ziele in einer Vorschau.
 - Aktivieren, Deaktivieren und Löschen verlangen eine aktuelle JSON-Sicherung.

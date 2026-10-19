@@ -54,7 +54,11 @@ export const canAct = (d, action) =>
   ["on", "off"].includes(action)
     ? Boolean(d._admApplianceId) && !isGroup(d) && !isEcho(d)
     : action === "delete"
-      ? Boolean(d._admEndpointId || d._admApplianceId)
+      ? !d._admDeleteUnavailable && Boolean(d._admEndpointId || d._admApplianceId)
+      : action === "groupCreate"
+        ? Boolean(d._admEndpointId) && !isGroup(d)
+        : action === "groupRename"
+          ? Boolean(d._admGroupId) && isGroup(d)
       : Boolean(d._admEndpointId);
 export function toggleVisible(selected, visible) {
   const next = new Set(selected);
@@ -133,6 +137,21 @@ export const ENABLE_QUERY = `mutation setEndpointEnablement($input: SetEndpointE
 }`;
 const DELETE_QUERY =
   "mutation forgetEndpoint($input: ForgetEndpointInput!) { forgetEndpoint(forgetEndpointInput: $input) { endpointId } }";
+export const LIST_GROUPS_QUERY = `query listDeviceGroups {
+  listDeviceGroups(listDeviceGroupsInput: {}) {
+    deviceGroups {
+      id
+      friendlyName { value { text } }
+      memberDevices { items { id friendlyNameObject { value { text } } } }
+    }
+  }
+}`;
+export const CREATE_GROUP_QUERY = `mutation createDeviceGroup($in: CreateDeviceGroupInput!) {
+  createDeviceGroup(createDeviceGroupInput: $in) { __typename }
+}`;
+export const RENAME_ENDPOINT_QUERY = `mutation setEndpointFriendlyName($in: SetEndpointFriendlyNameInput!) {
+  setEndpointFriendlyName(input: $in) { __typename }
+}`;
 
 const missingResourcePattern =
   /\b(resource|endpoint)\b.*\b(does not exist|not found|no longer exists)\b/i;
@@ -209,6 +228,35 @@ export function mergeDevices(entities, endpoints) {
       );
     }
   return result;
+}
+
+const normalizedName = (value) =>
+  String(value || "").trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+export function attachDeviceGroups(devices, groups = []) {
+  if (!Array.isArray(groups)) return devices;
+  const byId = new Map(groups.filter((g) => g?.id).map((g) => [g.id, g]));
+  const byName = new Map();
+  for (const group of groups) {
+    const key = normalizedName(group?.friendlyName?.value?.text);
+    if (!key) continue;
+    const matches = byName.get(key) || [];
+    matches.push(group);
+    byName.set(key, matches);
+  }
+  return devices.map((device) => {
+    if (!isGroup(device)) return device;
+    const direct = byId.get(device.id) || byId.get(device._admEndpointId);
+    const matches = byName.get(normalizedName(deviceName(device))) || [];
+    const group = direct || (matches.length === 1 ? matches[0] : null);
+    if (!group) return device;
+    return {
+      ...device,
+      _admGroupId: group.id,
+      _admGroupMemberEndpointIds:
+        group.memberDevices?.items?.map((item) => item?.id).filter(Boolean) || [],
+    };
+  });
 }
 
 export function resolveEcho(d, devices) {
@@ -290,22 +338,102 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
     }
     return body;
   }
-  const gql = (query, operationName, input) =>
+  const gqlVariables = (query, operationName, variables) =>
     request("/nexus/v1/graphql", {
       method: "POST",
       body: JSON.stringify({
         query,
         operationName,
-        ...(input ? { variables: { input } } : {}),
+        ...(variables ? { variables } : {}),
       }),
     });
+  const gql = (query, operationName, input) =>
+    gqlVariables(query, operationName, input ? { input } : undefined);
+  const listGroups = async () => {
+    const body = await gqlVariables(LIST_GROUPS_QUERY, "listDeviceGroups");
+    const groups = body?.data?.listDeviceGroups?.deviceGroups;
+    if (!Array.isArray(groups)) throw new Error("Gruppendaten fehlen.");
+    return groups;
+  };
   return {
     async load() {
       const entities = await request(
         "/api/behaviors/entities?skillId=amzn1.ask.1p.smarthome",
       );
       const data = await gql(LIST_QUERY, "getDevicesBaseData");
-      return mergeDevices(entities, data?.data?.allDevices?.endpoints);
+      const devices = mergeDevices(entities, data?.data?.allDevices?.endpoints);
+      try {
+        return attachDeviceGroups(devices, await listGroups());
+      } catch {
+        return devices;
+      }
+    },
+    listGroups,
+    async createGroup(name, memberDeviceIds) {
+      const friendlyName = String(name || "").trim();
+      const ids = [...new Set(memberDeviceIds || [])];
+      if (!friendlyName || !ids.length || ids.some((id) => !id))
+        throw new Error("Gruppenname und eindeutige Mitglieder sind erforderlich.");
+      const before = await listGroups();
+      if (
+        before.some(
+          (group) =>
+            normalizedName(group?.friendlyName?.value?.text) ===
+            normalizedName(friendlyName),
+        )
+      )
+        throw new Error("Eine Gruppe mit diesem Namen ist bereits vorhanden.");
+      const body = await gqlVariables(CREATE_GROUP_QUERY, "createDeviceGroup", {
+        in: { friendlyName, memberDeviceIds: ids },
+      });
+      if (!body?.data?.createDeviceGroup)
+        throw new Error("Amazon hat die Gruppenerstellung nicht bestätigt.");
+      const groups = await listGroups();
+      const matches = groups.filter(
+        (group) => normalizedName(group?.friendlyName?.value?.text) === normalizedName(friendlyName),
+      );
+      const verified = matches.find((group) => {
+        const actual = new Set(
+          group.memberDevices?.items?.map((item) => item?.id).filter(Boolean) || [],
+        );
+        return ids.every((id) => actual.has(id));
+      });
+      if (!verified)
+        throw new Error("Die neue Gruppe konnte bei der Nachkontrolle nicht bestätigt werden.");
+      return verified;
+    },
+    async renameGroup(groupId, name) {
+      const friendlyName = String(name || "").trim();
+      if (!groupId || !friendlyName)
+        throw new Error("Gruppe und neuer Name sind erforderlich.");
+      if (/[-\x00-\x1f\x7f]/.test(friendlyName))
+        throw new Error("Der Gruppenname enthält Zeichen, die Alexa nicht sprechen kann.");
+      const before = await listGroups();
+      if (!before.some((group) => group.id === groupId))
+        throw new Error("Die ausgewählte Gruppe wurde nicht mehr gefunden.");
+      if (
+        before.some(
+          (group) =>
+            group.id !== groupId &&
+            normalizedName(group?.friendlyName?.value?.text) ===
+              normalizedName(friendlyName),
+        )
+      )
+        throw new Error("Eine andere Gruppe verwendet diesen Namen bereits.");
+      const body = await gqlVariables(RENAME_ENDPOINT_QUERY, "setEndpointFriendlyName", {
+        in: { endpointId: groupId, friendlyName },
+      });
+      if (!body?.data?.setEndpointFriendlyName)
+        throw new Error("Amazon hat die Umbenennung nicht bestätigt.");
+      const groups = await listGroups();
+      const verified = groups.find(
+        (group) =>
+          group.id === groupId &&
+          group?.friendlyName?.value?.text === friendlyName,
+      );
+      if (!verified)
+        throw new Error("Der neue Gruppenname konnte bei der Nachkontrolle nicht bestätigt werden.");
+      return verified;
     },
     async mutate(d, action) {
       if (!canAct(d, action))
@@ -320,10 +448,13 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
               throw new Error("Löschung von Amazon nicht bestätigt.");
           } catch (error) {
             if (!isMissingResourceError(error)) throw error;
-            if (!d._admApplianceId)
-              throw new Error(
+            if (!d._admApplianceId) {
+              const unavailable = new Error(
                 "Amazon listet diesen Endpoint noch auf, findet aber keine löschbare Ressource. Keine sichere Legacy-ID für einen Rückfall vorhanden.",
               );
+              unavailable.code = "NO_SAFE_DELETE_ID";
+              throw unavailable;
+            }
             await request(
               "/api/phoenix/appliance/" +
                 encodeURIComponent(d._admApplianceId),
@@ -467,6 +598,8 @@ export async function runBatch(
     allowProtectedIds = [],
     logger = () => {},
     delay = (ms) => new Promise((r) => setTimeout(r, ms)),
+    onProgress = () => {},
+    shouldCancel = () => false,
   } = {},
 ) {
   if (!["delete", "enable", "disable"].includes(action))
@@ -483,14 +616,25 @@ export async function runBatch(
   ];
   const results = [];
   let stopped = false;
-  for (const d of unique) {
+  let cancelled = false;
+  onProgress({ completed: 0, total: unique.length, current: null });
+  for (let index = 0; index < unique.length; index++) {
+    const d = unique[index];
+    if (shouldCancel()) {
+      cancelled = true;
+      for (const remaining of unique.slice(index))
+        results.push({ device: remaining, error: "Vom Benutzer abgebrochen.", skipped: true });
+      break;
+    }
     if (stopped) {
       results.push({
         device: d,
         error: "Nach Anfragelimit oder Anmeldefehler übersprungen.",
+        skipped: true,
       });
       continue;
     }
+    onProgress({ completed: index, total: unique.length, current: deviceName(d) });
     try {
       const target = action === "enable" ? "ENABLED" : "DISABLED_BY_CUSTOMER";
       if (action === "delete" || d._admEnablement !== target)
@@ -498,18 +642,19 @@ export async function runBatch(
       results.push({ device: d });
       logger(`${deviceName(d)}: Nachkontrolle ausstehend.`);
     } catch (error) {
-      results.push({ device: d, error: error.message });
+      results.push({ device: d, error: error.message, errorCode: error.code });
       logger(`${deviceName(d)}: ${error.message}`, "error");
       stopped = [429, 401, 403].includes(error.status);
     }
+    onProgress({ completed: index + 1, total: unique.length, current: deviceName(d) });
     if (!stopped) await delay(800);
   }
-  if (stopped) return { results, devices: null, verified: false };
+  if (stopped) return { results, devices: null, verified: false, cancelled };
   let devices;
   try {
     devices = await client.load();
   } catch {
-    return { results, devices: null, verified: false };
+    return { results, devices: null, verified: false, cancelled };
   }
   for (const result of results) {
     const d = result.device;
@@ -521,7 +666,7 @@ export async function runBatch(
     // The behavior entity can outlive the modern endpoint; do not claim removal yet.
     const absent = !matches.length && !devices.some((x) => x.id === d.id);
     result.success =
-      !result.error &&
+      !result.error && !result.skipped &&
       (action === "delete"
         ? absent
         : matches.length > 0 &&
@@ -531,5 +676,5 @@ export async function runBatch(
               (action === "enable" ? "ENABLED" : "DISABLED_BY_CUSTOMER"),
           ));
   }
-  return { results, devices, verified: true };
+  return { results, devices, verified: true, cancelled };
 }
