@@ -152,7 +152,7 @@ export function useAlexa(language = "de") {
         );
       }
       const failed = outcome.results.filter((r) => !r.success);
-      for (const r of failed.filter((result) => !result.skipped))
+      for (const r of failed.filter((result) => !result.skipped && !result.logged))
         logger(
           `${deviceName(r.device)}: ${r.error ? localizeMessage(language, r.error) : tr(language, "targetNotReached")}`,
           "error",

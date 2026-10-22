@@ -1,6 +1,6 @@
 # Aura Device Master
 
-[![Release](https://img.shields.io/badge/release-v0.8.0-00a3ff)](https://github.com/stereodruid/Aura-Device-Master/releases/tag/v0.8.0)
+[![Release](https://img.shields.io/badge/release-v0.8.1-00a3ff)](https://github.com/stereodruid/Aura-Device-Master/releases/tag/v0.8.1)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-00d48a)](LICENSE)
 
 [![Install Aura Device Master from the Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-Install_Aura_Device_Master-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/aura-device-master/ebfopagpcecfbmodklhlafplpdlohfgc)
@@ -41,9 +41,9 @@ A free, local Chrome extension for viewing and safely managing Alexa smart-home 
 
 This is the recommended installation method. Chrome installs updates automatically. Aura Device Master is completely free and has no subscriptions.
 
-## Manual installation of v0.8.0
+## Manual installation of v0.8.1
 
-1. Download [Aura Device Master v0.8.0](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.8.0/Aura-Device-Master-v0.8.0.zip).
+1. Download [Aura Device Master v0.8.1](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.8.1/Aura-Device-Master-v0.8.1.zip).
 2. Extract the ZIP file to a permanent folder.
 3. Open `chrome://extensions/` in Chrome.
 4. Enable **Developer mode**.
@@ -73,7 +73,7 @@ Before changing devices:
 
 The app reloads the inventory after delete, enable and disable operations. A successful HTTP response alone is not presented as confirmed success. Authentication failures and rate limits stop the remaining batch without automatic retry loops.
 
-If Amazon reports that an endpoint no longer exists, Aura Device Master uses the legacy appliance ID only when Amazon supplied one for the same mapped device. If no safe fallback ID exists, the log explains that the stale device must be removed from its source integration, such as ioBroker or Home Assistant.
+If Amazon reports that an endpoint no longer exists, Aura Device Master uses the legacy appliance ID only when Amazon supplied one for the exact same endpoint ID. Version 0.8.1 also checks Amazon's secondary endpoint inventory when the main list omits that legacy ID. If no safe fallback ID exists, the log explains that the stale device must be removed from its source integration, such as ioBroker or Home Assistant.
 
 ## Speech and device commands
 
@@ -118,9 +118,9 @@ Aura Device Master ist eine kostenlose, lokale Chrome-Erweiterung zur Anzeige un
 
 Das ist der empfohlene Installationsweg. Chrome installiert Aktualisierungen automatisch. Aura Device Master bleibt vollständig kostenlos und enthält keine Abos.
 
-### Manuelle Installation von v0.8.0
+### Manuelle Installation von v0.8.1
 
-1. [Aura Device Master v0.8.0 herunterladen](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.8.0/Aura-Device-Master-v0.8.0.zip).
+1. [Aura Device Master v0.8.1 herunterladen](https://github.com/stereodruid/Aura-Device-Master/releases/download/v0.8.1/Aura-Device-Master-v0.8.1.zip).
 2. ZIP-Datei dauerhaft entpacken.
 3. `chrome://extensions/` öffnen und den **Entwicklermodus** aktivieren.
 4. **Entpackte Erweiterung laden** wählen und den entpackten Ordner mit `manifest.json` auswählen.
@@ -140,7 +140,7 @@ Beim Aktualisieren die Dateien ersetzen, die Erweiterung unter `chrome://extensi
 - Geschützte Ziele müssen einzeln für die konkrete Aktion freigegeben werden.
 - Dauerhaftes Löschen verlangt zusätzlich die Eingabe `DELETE`.
 - Nach der Aktion lädt die App neu und kontrolliert den tatsächlichen Zielzustand.
-- Veraltete ioBroker-/Integrationsgeräte erhalten bei Amazons Meldung `Resource does not exist` einen eng begrenzten Legacy-Löschversuch, sofern eine sichere Appliance-ID vorhanden ist.
+- Veraltete ioBroker-/Integrationsgeräte erhalten bei Amazons Meldung `Resource does not exist` einen eng begrenzten Legacy-Löschversuch. Version 0.8.1 gleicht dafür bei Bedarf auch Amazons zweite Endpunktliste über die exakt gleiche Endpoint-ID ab; Namen werden niemals als Löschziel verwendet.
 - Echo-Geräte unterstützen direktes Sprechen, Ankündigungen mit Hinweiston und simulierte Sprachbefehle.
 
 Die Videos stehen oben im Abschnitt [Demo videos](#demo-videos) in Deutsch und Englisch sowie in 16:9 und 9:16 bereit.

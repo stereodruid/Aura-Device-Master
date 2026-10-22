@@ -69,6 +69,20 @@ const { chromium } = require(process.env.AURA_PLAYWRIGHT || "playwright");
           return route.fulfill({
             json: { data: { listDeviceGroups: { deviceGroups: [] } } },
           });
+        if (body.operationName === "getLegacyEndpointData")
+          return route.fulfill({
+            json: {
+              data: {
+                endpoints: {
+                  items: endpoints.map((endpoint) => ({
+                    id: endpoint.endpointId,
+                    enablement: endpoint.enablement,
+                    legacyAppliance: endpoint.legacyAppliance,
+                  })),
+                },
+              },
+            },
+          });
         mutations++;
         if (body.operationName === "setEndpointEnablement") {
           const d = endpoints.find(

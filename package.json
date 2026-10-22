@@ -1,6 +1,6 @@
 {
   "name": "aura-device-master",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Local Chrome extension for safely managing Alexa smart-home devices in an existing Amazon session.",
   "main": "index.js",
   "scripts": {

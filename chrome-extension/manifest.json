@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aura Device Master",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Local Alexa device manager with backups, filters, safe actions and German/English interface.",
   "permissions": [
     "scripting"

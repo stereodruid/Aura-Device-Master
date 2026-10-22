@@ -31,20 +31,16 @@ export const source = (d) => {
   return isEcho(d) || text.includes("amazon") ? "Amazon" : "Andere";
 };
 export const reachability = (d) => {
-  if (d._admReachability)
-    return (
-      { OK: "Online", UNAVAILABLE: "Offline" }[d._admReachability] ||
-      "Unbekannt"
-    );
-  return (
-    {
-      ONLINE: "Online",
-      AVAILABLE: "Online",
-      OFFLINE: "Offline",
-      UNAVAILABLE: "Offline",
-      UNREACHABLE: "Offline",
-    }[d.availability] || "Unbekannt"
-  );
+  if (d._admDeleteUnavailable) return "Unbekannt";
+  const behaviorStatus = {
+    ONLINE: "Online",
+    AVAILABLE: "Online",
+    OFFLINE: "Offline",
+    UNAVAILABLE: "Offline",
+    UNREACHABLE: "Offline",
+  }[d.availability];
+  if (behaviorStatus) return behaviorStatus;
+  return { OK: "Online", UNAVAILABLE: "Offline" }[d._admReachability] || "Unbekannt";
 };
 export const enablement = (d) =>
   ({ ENABLED: "Aktiviert", DISABLED_BY_CUSTOMER: "Deaktiviert" })[
@@ -143,6 +139,15 @@ export const LIST_GROUPS_QUERY = `query listDeviceGroups {
       id
       friendlyName { value { text } }
       memberDevices { items { id friendlyNameObject { value { text } } } }
+    }
+  }
+}`;
+export const LEGACY_ENDPOINTS_QUERY = `query getLegacyEndpointData {
+  endpoints(endpointsQueryParams: { paginationParams: { disablePagination: true } }) {
+    items {
+      id
+      enablement
+      legacyAppliance { applianceId }
     }
   }
 }`;
@@ -259,6 +264,23 @@ export function attachDeviceGroups(devices, groups = []) {
   });
 }
 
+export function enrichEndpointDetails(endpoints, details = []) {
+  if (!Array.isArray(endpoints) || !Array.isArray(details)) return endpoints;
+  const byId = new Map(details.filter((item) => item?.id).map((item) => [item.id, item]));
+  return endpoints.map((endpoint) => {
+    const detail = byId.get(endpoint?.endpointId);
+    if (!detail) return endpoint;
+    return {
+      ...endpoint,
+      enablement: endpoint.enablement || detail.enablement,
+      legacyAppliance:
+        endpoint.legacyAppliance?.applianceId
+          ? endpoint.legacyAppliance
+          : detail.legacyAppliance || endpoint.legacyAppliance,
+    };
+  });
+}
+
 export function resolveEcho(d, devices) {
   if (!Array.isArray(devices)) throw new Error("Echo-Geräteliste fehlt.");
   const identifiers = new Set(
@@ -355,13 +377,28 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
     if (!Array.isArray(groups)) throw new Error("Gruppendaten fehlen.");
     return groups;
   };
+  const listLegacyEndpointDetails = async () => {
+    const body = await gqlVariables(
+      LEGACY_ENDPOINTS_QUERY,
+      "getLegacyEndpointData",
+    );
+    const items = body?.data?.endpoints?.items;
+    if (!Array.isArray(items)) throw new Error("Legacy-Endpunktdaten fehlen.");
+    return items;
+  };
   return {
     async load() {
       const entities = await request(
         "/api/behaviors/entities?skillId=amzn1.ask.1p.smarthome",
       );
       const data = await gql(LIST_QUERY, "getDevicesBaseData");
-      const devices = mergeDevices(entities, data?.data?.allDevices?.endpoints);
+      let endpoints = data?.data?.allDevices?.endpoints;
+      try {
+        endpoints = enrichEndpointDetails(endpoints, await listLegacyEndpointDetails());
+      } catch {
+        // The main inventory remains usable if this optional legacy lookup changes.
+      }
+      const devices = mergeDevices(entities, endpoints);
       try {
         return attachDeviceGroups(devices, await listGroups());
       } catch {
@@ -369,6 +406,7 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
       }
     },
     listGroups,
+    listLegacyEndpointDetails,
     async createGroup(name, memberDeviceIds) {
       const friendlyName = String(name || "").trim();
       const ids = [...new Set(memberDeviceIds || [])];
@@ -448,7 +486,19 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
               throw new Error("Löschung von Amazon nicht bestätigt.");
           } catch (error) {
             if (!isMissingResourceError(error)) throw error;
-            if (!d._admApplianceId) {
+            let applianceId = d._admApplianceId;
+            if (!applianceId) {
+              try {
+                const exact = (await listLegacyEndpointDetails()).filter(
+                  (item) => item?.id === d._admEndpointId,
+                );
+                if (exact.length === 1)
+                  applianceId = exact[0]?.legacyAppliance?.applianceId || null;
+              } catch (lookupError) {
+                if ([429, 401, 403].includes(lookupError.status)) throw lookupError;
+              }
+            }
+            if (!applianceId) {
               const unavailable = new Error(
                 "Amazon listet diesen Endpoint noch auf, findet aber keine löschbare Ressource. Keine sichere Legacy-ID für einen Rückfall vorhanden.",
               );
@@ -457,7 +507,7 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
             }
             await request(
               "/api/phoenix/appliance/" +
-                encodeURIComponent(d._admApplianceId),
+                encodeURIComponent(applianceId),
               { method: "DELETE" },
             );
           }
@@ -642,7 +692,12 @@ export async function runBatch(
       results.push({ device: d });
       logger(`${deviceName(d)}: Nachkontrolle ausstehend.`);
     } catch (error) {
-      results.push({ device: d, error: error.message, errorCode: error.code });
+      results.push({
+        device: d,
+        error: error.message,
+        errorCode: error.code,
+        logged: true,
+      });
       logger(`${deviceName(d)}: ${error.message}`, "error");
       stopped = [429, 401, 403].includes(error.status);
     }

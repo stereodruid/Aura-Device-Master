@@ -14,6 +14,7 @@ import {
   isMissingResourceError,
   attachDeviceGroups,
   canAct,
+  enrichEndpointDetails,
 } from "../src/alexa.js";
 
 test("Echo recognition supports top-level types and GraphQL categories", () => {
@@ -132,6 +133,33 @@ test("delete falls back to the legacy appliance only for a missing GraphQL resou
   assert.deepEqual(calls, [
     { url: "/nexus/v1/graphql", method: "POST" },
     { url: "/api/phoenix/appliance/legacy-1", method: "DELETE" },
+  ]);
+});
+test("delete recovers a legacy ID only from the exact modern endpoint match", async () => {
+  const calls = [];
+  const client = createAlexaClient(async (url, options) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url, operationName: body?.operationName });
+    if (body?.operationName === "forgetEndpoint")
+      return response({ errors: [{ message: "Resource does not exist" }] });
+    if (body?.operationName === "getLegacyEndpointData")
+      return response({
+        data: {
+          endpoints: {
+            items: [
+              { id: "other", legacyAppliance: { applianceId: "wrong" } },
+              { id: "ep-1", legacyAppliance: { applianceId: "recovered-legacy" } },
+            ],
+          },
+        },
+      });
+    return response(null, 204);
+  });
+  await client.mutate({ ...d, _admApplianceId: null }, "delete");
+  assert.deepEqual(calls, [
+    { url: "/nexus/v1/graphql", operationName: "forgetEndpoint" },
+    { url: "/nexus/v1/graphql", operationName: "getLegacyEndpointData" },
+    { url: "/api/phoenix/appliance/recovered-legacy", operationName: undefined },
   ]);
 });
 test("delete never uses the legacy fallback for unrelated, auth or rate-limit errors", async () => {
@@ -327,13 +355,25 @@ test("group creation and rename send modern GraphQL inputs and verify by reread"
     friendlyName: "Lounge",
   });
 });
-test("unknown reachability is not offline and modern state takes precedence", () => {
+test("behavior availability is preferred and modern reachability is a fallback", () => {
   assert.equal(reachability({}), "Unbekannt");
   assert.equal(
     reachability({ _admReachability: "UNAVAILABLE", availability: "ONLINE" }),
-    "Offline",
+    "Online",
   );
+  assert.equal(reachability({ _admReachability: "UNAVAILABLE" }), "Offline");
+  assert.equal(reachability({ _admReachability: "OK", _admDeleteUnavailable: true }), "Unbekannt");
   assert.equal(source({ id: "x", displayName: "Third party" }), "Andere");
+});
+test("legacy endpoint details enrich only the same endpoint ID", () => {
+  const enriched = enrichEndpointDetails(
+    [{ endpointId: "ep-1", legacyAppliance: null }],
+    [
+      { id: "other", legacyAppliance: { applianceId: "wrong" } },
+      { id: "ep-1", legacyAppliance: { applianceId: "exact" } },
+    ],
+  );
+  assert.equal(enriched[0].legacyAppliance.applianceId, "exact");
 });
 test("filter toggles protection and supports group membership and all searchable IDs", () => {
   const group = {
