@@ -355,6 +355,118 @@ test("group creation and rename send modern GraphQL inputs and verify by reread"
     friendlyName: "Lounge",
   });
 });
+
+test("group membership updates send UpdateDeviceGroupInput one by one and verify by reread", async () => {
+  const sent = [];
+  let members = ["ep-1"];
+  const client = createAlexaClient(async (_url, options) => {
+    const request = JSON.parse(options.body);
+    sent.push(request);
+    if (request.operationName === "updateDeviceGroup") {
+      const { memberDeviceIds, memberDeviceIdsUpdateOperation } = request.variables.in;
+      if (memberDeviceIdsUpdateOperation === "ADD") {
+        members = [...new Set([...members, ...memberDeviceIds])];
+      } else if (memberDeviceIdsUpdateOperation === "REMOVE") {
+        members = members.filter((id) => !memberDeviceIds.includes(id));
+      }
+      return response({ data: { updateDeviceGroup: { __typename: "UpdateDeviceGroupsResponse" } } });
+    }
+    return response({
+      data: {
+        listDeviceGroups: {
+          deviceGroups: [
+            {
+              id: "group-1",
+              friendlyName: { value: { text: "Living Room" } },
+              memberDevices: { items: members.map((id) => ({ id })) },
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  await client.updateGroupMembers("group-1", ["ep-2", "ep-3"], "ADD");
+  assert.deepEqual(members, ["ep-1", "ep-2", "ep-3"]);
+  const updates = sent.filter((entry) => entry.operationName === "updateDeviceGroup");
+  assert.equal(updates.length, 2);
+  assert.deepEqual(updates[0].variables.in, {
+    deviceGroupId: "group-1",
+    memberDeviceIds: ["ep-2"],
+    memberDeviceIdsUpdateOperation: "ADD",
+  });
+  assert.deepEqual(updates[1].variables.in, {
+    deviceGroupId: "group-1",
+    memberDeviceIds: ["ep-3"],
+    memberDeviceIdsUpdateOperation: "ADD",
+  });
+
+  await client.updateGroupMembers("group-1", ["ep-1"], "REMOVE");
+  assert.deepEqual(members, ["ep-2", "ep-3"]);
+});
+
+test("routines can be listed and executed with replaced Echo placeholders", async () => {
+  let executedPreview = null;
+  const client = createAlexaClient(async (url, options) => {
+    if (url.includes("/api/behaviors/v2/automations")) {
+      return response([
+        {
+          automationId: "auto-1",
+          name: "Guten Morgen",
+          status: "ENABLED",
+          description: "Morgenroutine",
+          triggers: [{ type: "Alexa.Weather.Play", payload: { utterance: "Alexa, guten morgen" } }],
+          sequence: {
+            "@type": "com.amazon.alexa.behaviors.model.Sequence",
+            startNode: {
+              type: "Alexa.Speak",
+              operationPayload: {
+                deviceSerialNumber: "ALEXA_CURRENT_DSN",
+                deviceType: "ALEXA_CURRENT_DEVICE_TYPE",
+                textToSpeak: "Guten Morgen!",
+              },
+            },
+          },
+        },
+        {
+          automationId: "auto-2",
+          name: "Inaktiv",
+          status: "DISABLED",
+          sequence: {},
+        },
+      ]);
+    }
+    if (url.includes("/api/devices-v2/device")) {
+      return response({
+        devices: [
+          {
+            serialNumber: "ECHO_SERIAL_123",
+            deviceType: "ECHO_TYPE_456",
+            deviceOwnerCustomerId: "CUST_789",
+          },
+        ],
+      });
+    }
+    if (url.includes("/api/behaviors/preview")) {
+      executedPreview = JSON.parse(options.body);
+      return response({});
+    }
+    return response({});
+  });
+
+  const routines = await client.listRoutines();
+  assert.equal(routines.length, 1);
+  assert.equal(routines[0].name, "Guten Morgen");
+  assert.equal(routines[0].triggerSummary, '"Alexa, guten morgen"');
+
+  await client.runRoutine(routines[0]);
+  assert.ok(executedPreview);
+  assert.equal(executedPreview.behaviorId, "PREVIEW");
+  const parsedSeq = JSON.parse(executedPreview.sequenceJson);
+  assert.equal(parsedSeq.startNode.operationPayload.deviceSerialNumber, "ECHO_SERIAL_123");
+  assert.equal(parsedSeq.startNode.operationPayload.deviceType, "ECHO_TYPE_456");
+});
+
 test("behavior availability is preferred and modern reachability is a fallback", () => {
   assert.equal(reachability({}), "Unbekannt");
   assert.equal(

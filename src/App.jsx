@@ -65,6 +65,8 @@ import {
   TreePine,
   AudioLines,
   Pencil,
+  Plus,
+  Play,
 } from "lucide-react";
 import { useAlexa } from "./hooks/useAlexa";
 import { deviceVisual } from "./deviceVisual";
@@ -308,7 +310,13 @@ export default function App() {
     fetchDevices,
     execute,
     cancelBatch,
+    routines,
+    routinesBusy,
+    fetchRoutines,
   } = useAlexa(language);
+    const [activeView, setActiveView] = useState("devices");
+  const [routineSearch, setRoutineSearch] = useState("");
+  const [selectedDeviceToAdd, setSelectedDeviceToAdd] = useState("");
   const [filters, setFilters] = useState({
     ...emptyFilters,
     hideProtected: true,
@@ -488,14 +496,18 @@ export default function App() {
     }
   }
   function preview(action, list = checked, extra = {}) {
-    if (busy || !ready || !list.length) return;
+    if (busy || !ready) return;
+    if (!list.length && action !== "runRoutine") return;
     setPlan({
       action,
       list: [...list],
       text: speech,
       locale: language === "de" ? "de-DE" : "en-US",
       groupName:
-        extra.groupName ?? (action === "groupRename" ? deviceName(list[0]) : ""),
+        extra.groupName ?? (action === "groupRename" && list[0] ? deviceName(list[0]) : ""),
+      endpointIds: extra.endpointIds || [],
+      memberName: extra.memberName || "",
+      routine: extra.routine || null,
     });
     setBackedUp(false);
     setProtectedIds(new Set());
@@ -514,26 +526,31 @@ export default function App() {
     logger(t("dryRunLog", { count: rows.length }));
   }
   async function submit() {
+    const isRoutineAction = plan?.action === "runRoutine";
+    const isSafeAction = isVoiceAction(plan?.action) || isRoutineAction;
     if (
       !plan ||
       !ready ||
       busy ||
-      (!isVoiceAction(plan.action) && !backedUp) ||
+      (!isSafeAction && !backedUp) ||
       (["groupCreate", "groupRename"].includes(plan.action) && !plan.groupName?.trim()) ||
+      (isRoutineAction && !plan.list.length) ||
       plan.list.some(
-        (d) => !isVoiceAction(plan.action) && !canAct(d, plan.action),
+        (d) => !isSafeAction && !canAct(d, plan.action),
       ) ||
-      (!isVoiceAction(plan.action) && plan.list.some((d) => isProtected(d) && !protectedIds.has(d.id))) ||
+      (!isSafeAction && plan.list.some((d) => isProtected(d) && !protectedIds.has(d.id))) ||
       (plan.action === "delete" && confirmation !== "DELETE")
     )
       return;
     const ok = await execute(plan.list, plan.action, {
-      backup: isVoiceAction(plan.action) || backedUp,
+      backup: isSafeAction || backedUp,
       preview: true,
       allowProtectedIds: [...protectedIds],
       text: plan.text,
       locale: plan.locale,
       groupName: plan.groupName,
+      endpointIds: plan.endpointIds,
+      routine: plan.routine,
     });
     setPlan(null);
     if (ok) {
@@ -543,6 +560,18 @@ export default function App() {
   }
   const filter = (key, value) =>
     setFilters((prev) => ({ ...prev, [key]: value }));
+  
+  const filteredRoutines = useMemo(() => {
+    if (!routineSearch.trim()) return routines;
+    const q = routineSearch.toLowerCase();
+    return routines.filter(
+      (r) =>
+        r.name?.toLowerCase().includes(q) ||
+        r.description?.toLowerCase().includes(q) ||
+        r.triggerSummary?.toLowerCase().includes(q),
+    );
+  }, [routines, routineSearch]);
+
   const blocked = busy || !ready;
   const columnLabels = Object.fromEntries(defaultColumns.map((key) => [key, t(key)]));
   const actionLabels = {
@@ -550,6 +579,8 @@ export default function App() {
     on: t("powerOn"), off: t("powerOff"), speak: t("speak"),
     announce: t("announce"), command: t("command"),
     groupCreate: t("createGroup"), groupRename: t("renameGroup"),
+    groupAddMember: t("addMember"), groupRemoveMember: t("removeMember"),
+    runRoutine: t("runRoutine"),
   };
   return (
     <div className="aura-app">
@@ -562,6 +593,29 @@ export default function App() {
               {t("subtitle")}
             </p>
           </div>
+        </div>
+        <div className="view-switch" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeView === "devices"}
+            className={activeView === "devices" ? "active" : ""}
+            onClick={() => setActiveView("devices")}
+          >
+            <Smartphone size={16} /> {t("devices")} ({devices.length})
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeView === "routines"}
+            className={activeView === "routines" ? "active" : ""}
+            onClick={() => {
+              setActiveView("routines");
+              if (!routines.length && !routinesBusy) fetchRoutines();
+            }}
+          >
+            <Layers size={16} /> {t("routines")} {routines.length ? `(${routines.length})` : ""}
+          </button>
         </div>
         <div className="toolbar">
           <label className="language-select">
@@ -620,6 +674,7 @@ export default function App() {
           </button>
         ))}
       </div>
+      {activeView === "devices" ? (
       <main className="workspace">
         <section className="panel device-list">
           <div className="table-scroll">
@@ -959,6 +1014,79 @@ export default function App() {
                 <dt>{t("dataAsOf")}</dt>
                 <dd>{loadedAt?.toLocaleTimeString(language === "de" ? "de-DE" : "en-US") || t("unknown")}</dd>
               </dl>
+              {isGroup(selected) && (
+                <div className="group-members-panel">
+                  <div className="group-members-header">
+                    <span>{t("groupMembers")} ({(selected._admGroupMemberEndpointIds || []).length})</span>
+                  </div>
+                  {!(selected._admGroupMemberEndpointIds || []).length ? (
+                    <p className="muted small" style={{ margin: "4px 0" }}>{t("noGroupMembers")}</p>
+                  ) : (
+                    <ul className="group-members-list">
+                      {(selected._admGroupMemberEndpointIds || []).map((epId) => {
+                        const memberDev = devices.find((d) => d._admEndpointId === epId);
+                        const name = memberDev ? deviceName(memberDev) : epId;
+                        return (
+                          <li key={epId} className="group-member-item">
+                            <span className="group-member-name" title={name}>{name}</span>
+                            <button
+                              type="button"
+                              className="group-member-remove"
+                              title={t("removeMember")}
+                              disabled={blocked}
+                              onClick={() =>
+                                preview("groupRemoveMember", [selected], {
+                                  endpointIds: [epId],
+                                  memberName: name,
+                                })
+                              }
+                            >
+                              <X size={14} />
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <div className="group-member-add-row">
+                    <select
+                      value={selectedDeviceToAdd}
+                      onChange={(e) => setSelectedDeviceToAdd(e.target.value)}
+                      disabled={blocked}
+                    >
+                      <option value="">{t("selectDeviceToAdd")}</option>
+                      {devices
+                        .filter(
+                          (d) =>
+                            d._admEndpointId &&
+                            !isGroup(d) &&
+                            !(selected._admGroupMemberEndpointIds || []).includes(d._admEndpointId),
+                        )
+                        .map((d) => (
+                          <option key={d.id} value={d._admEndpointId}>
+                            {deviceName(d)}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={blocked || !selectedDeviceToAdd}
+                      onClick={() => {
+                        const targetDev = devices.find((d) => d._admEndpointId === selectedDeviceToAdd);
+                        const name = targetDev ? deviceName(targetDev) : selectedDeviceToAdd;
+                        preview("groupAddMember", [selected], {
+                          endpointIds: [selectedDeviceToAdd],
+                          memberName: name,
+                        });
+                        setSelectedDeviceToAdd("");
+                      }}
+                    >
+                      <Plus size={14} />
+                    </button>
+                  </div>
+                </div>
+              )}
               {isEcho(selected) ? (
                 <form
                   className="speech-panel"
@@ -1018,6 +1146,104 @@ export default function App() {
           </section>
         </aside>
       </main>
+      ) : (
+      <main className="workspace">
+        <section className="panel routines-view" style={{ flex: 1, padding: "16px", display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+          <div className="routines-toolbar">
+            <div className="search-field" style={{ flex: 1, maxWidth: 360 }}>
+              <Search size={16} />
+              <input
+                type="search"
+                placeholder={t("searchRoutines")}
+                value={routineSearch}
+                onChange={(e) => setRoutineSearch(e.target.value)}
+              />
+            </div>
+            <button
+              className="primary"
+              disabled={routinesBusy || busy}
+              onClick={fetchRoutines}
+            >
+              <RefreshCw size={16} className={routinesBusy ? "spin" : ""} />
+              {routinesBusy ? t("waiting") : t("reload")}
+            </button>
+          </div>
+          <div className="table-scroll" style={{ flex: 1, overflowY: "auto" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("name")}</th>
+                  <th>{t("status")}</th>
+                  <th>{t("routineTrigger")}</th>
+                  <th>{t("description")}</th>
+                  <th>{t("actions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRoutines.map((routine) => (
+                  <tr key={routine.id}>
+                    <td>
+                      <strong>{routine.name}</strong>
+                    </td>
+                    <td>
+                      <span className="status-online">{t("enabled")}</span>
+                    </td>
+                    <td>
+                      <span className="routine-trigger-tag">{routine.triggerSummary}</span>
+                    </td>
+                    <td className="muted">
+                      {routine.description || "–"}
+                    </td>
+                    <td>
+                      <button
+                        className="primary"
+                        disabled={blocked}
+                        onClick={() => {
+                          const firstEcho = devices.find(isEcho);
+                          preview("runRoutine", firstEcho ? [firstEcho] : [], { routine });
+                        }}
+                      >
+                        <Play size={14} /> {t("runRoutine")}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {!filteredRoutines.length && (
+                  <tr>
+                    <td colSpan={5} className="empty-message" style={{ textAlign: "center", padding: "32px", color: "#94a3b8" }}>
+                      {routinesBusy ? t("loadingDevices") : t("noRoutines")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <aside className="panel sidebar">
+          <div className="detail-heading">
+            <span className="device-art" role="img" aria-label={t("routines")}>
+              <Layers size={48} strokeWidth={1.5} />
+            </span>
+            <div>
+              <h2>{t("routines")}</h2>
+              <p className="muted">{t("routinesCount", { count: routines.length })}</p>
+            </div>
+          </div>
+          <div className="log" aria-label={t("activityLog")}>
+            <h3>
+              <Terminal size={14} /> {t("activityLog")}
+            </h3>
+            <div ref={logRef}>
+              {logs.map((entry, index) => (
+                <p key={index} className={entry.level === "error" ? "log-error" : ""}>
+                  {entry.text}
+                </p>
+              ))}
+            </div>
+          </div>
+        </aside>
+      </main>
+      )}
       <section className="panel filters" aria-label={t("filters")}>
         <label className="search">
           <Search size={16} />
@@ -1168,36 +1394,73 @@ export default function App() {
             </p>
             {isVoiceAction(plan.action) && <blockquote>{plan.text}</blockquote>}
             <div className="plan-list">
-              {plan.list.slice(0, 100).map((d) => (
-                <div className="plan-item" key={d.id}>
-                  <strong>{deviceName(d)}</strong>
-                  <code>{d._admEndpointId || d._admApplianceId || d.id}</code>
-                  {!isVoiceAction(plan.action) && !canAct(d, plan.action) && (
-                    <p className="status-offline">
-                      {t("unsuitable")}
-                    </p>
-                  )}
-                  {!isVoiceAction(plan.action) && isProtected(d) && (
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={protectedIds.has(d.id)}
-                        onChange={(e) =>
-                          setProtectedIds((prev) => {
-                            const next = new Set(prev);
-                            e.target.checked
-                              ? next.add(d.id)
-                              : next.delete(d.id);
-                            return next;
-                          })
-                        }
-                      />{" "}
-                      {t("allowProtected")}
-                    </label>
-                  )}
+              {plan.action === "runRoutine" ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px", padding: "12px", background: "#0a0f18", borderRadius: "10px", border: "1px solid #25324a" }}>
+                  <div>
+                    <h3 style={{ margin: "0 0 4px" }}>{plan.routine?.name}</h3>
+                    {plan.routine?.triggerSummary && (
+                      <span className="routine-trigger-tag">{plan.routine.triggerSummary}</span>
+                    )}
+                  </div>
+                  <label style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <span>{t("targetEcho")}:</span>
+                    <select
+                      value={plan.list[0]?.id || ""}
+                      onChange={(e) => {
+                        const echo = devices.find((d) => d.id === e.target.value);
+                        if (echo) setPlan((p) => ({ ...p, list: [echo] }));
+                      }}
+                      style={{ padding: "6px 8px", background: "#131b2b", color: "#fff", borderRadius: "6px", border: "1px solid #25324a" }}
+                    >
+                      {devices.filter(isEcho).map((echo) => (
+                        <option key={echo.id} value={echo.id}>
+                          {deviceName(echo)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
-              ))}
-              {plan.list.length > 100 && (
+              ) : ["groupAddMember", "groupRemoveMember"].includes(plan.action) ? (
+                <div style={{ padding: "12px", background: "#0a0f18", borderRadius: "10px", border: "1px solid #25324a" }}>
+                  <p style={{ margin: "0 0 8px" }}>
+                    <strong>{plan.action === "groupAddMember" ? t("addMember") : t("removeMember")}:</strong> {plan.memberName}
+                  </p>
+                  <p className="muted" style={{ margin: 0 }}>
+                    {t("group")}: <strong>{deviceName(plan.list[0])}</strong>
+                  </p>
+                </div>
+              ) : (
+                plan.list.slice(0, 100).map((d) => (
+                  <div className="plan-item" key={d.id}>
+                    <strong>{deviceName(d)}</strong>
+                    <code>{d._admEndpointId || d._admApplianceId || d.id}</code>
+                    {!isVoiceAction(plan.action) && !canAct(d, plan.action) && (
+                      <p className="status-offline">
+                        {t("unsuitable")}
+                      </p>
+                    )}
+                    {!isVoiceAction(plan.action) && isProtected(d) && (
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={protectedIds.has(d.id)}
+                          onChange={(e) =>
+                            setProtectedIds((prev) => {
+                              const next = new Set(prev);
+                              e.target.checked
+                                ? next.add(d.id)
+                                : next.delete(d.id);
+                              return next;
+                            })
+                          }
+                        />{" "}
+                        {t("allowProtected")}
+                      </label>
+                    )}
+                  </div>
+                ))
+              )}
+              {plan.action !== "runRoutine" && plan.list.length > 100 && (
                 <div className="plan-item muted">
                   {t("moreTargets", { count: plan.list.length - 100 })}
                 </div>
@@ -1216,7 +1479,7 @@ export default function App() {
                 />
               </label>
             )}
-            {!isVoiceAction(plan.action) && (
+            {!isVoiceAction(plan.action) && plan.action !== "runRoutine" && (
               <>
                 <button onClick={exportJson}>
                   <Download size={16} /> {t("downloadBackup")}
@@ -1253,19 +1516,20 @@ export default function App() {
                 className={plan.action === "delete" ? "danger" : "primary"}
                 disabled={
                   blocked ||
-                  (!isVoiceAction(plan.action) && !backedUp) ||
+                  (!isVoiceAction(plan.action) && plan.action !== "runRoutine" && !backedUp) ||
                   (["groupCreate", "groupRename"].includes(plan.action) && !plan.groupName?.trim()) ||
+                  (plan.action === "runRoutine" && !plan.list.length) ||
                   plan.list.some(
-                    (d) => !isVoiceAction(plan.action) && !canAct(d, plan.action),
+                    (d) => !isVoiceAction(plan.action) && plan.action !== "runRoutine" && !canAct(d, plan.action),
                   ) ||
-                  (!isVoiceAction(plan.action) && plan.list.some(
+                  (!isVoiceAction(plan.action) && plan.action !== "runRoutine" && plan.list.some(
                     (d) => isProtected(d) && !protectedIds.has(d.id),
                   )) ||
                   (plan.action === "delete" && confirmation !== "DELETE")
                 }
                 onClick={submit}
               >
-                {busy ? t("executing") : t("executeNow")}
+                {busy ? t("executing") : plan.action === "runRoutine" ? t("executeRoutineConfirm") : t("executeNow")}
               </button>
             </div>
           </section>

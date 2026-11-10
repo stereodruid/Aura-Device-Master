@@ -9,6 +9,8 @@ export function useAlexa(language = "de") {
   const [error, setError] = useState(null);
   const [ready, setReady] = useState(false);
   const [loadedAt, setLoadedAt] = useState(null);
+  const [routines, setRoutines] = useState([]);
+  const [routinesBusy, setRoutinesBusy] = useState(false);
   const [logs, setLogs] = useState([{ text: tr(language, "cliReady"), level: "info" }]);
   const [progress, setProgress] = useState(null);
   const lock = useRef(false);
@@ -53,9 +55,22 @@ export function useAlexa(language = "de") {
       setBusy(false);
     }
   }, [logger, language]);
+    const fetchRoutines = useCallback(async () => {
+    setRoutinesBusy(true);
+    try {
+      const list = await client.listRoutines();
+      setRoutines(list);
+      return list;
+    } catch (e) {
+      logger(localizeMessage(language, e.message), "error");
+      return [];
+    } finally {
+      setRoutinesBusy(false);
+    }
+  }, [language, logger]);
   const execute = async (list, action, approval) => {
     if (lock.current || !readyRef.current) return false;
-    const voiceAction = ["speak", "announce", "command"].includes(action);
+    const voiceAction = ["speak", "announce", "command", "runRoutine"].includes(action);
     if ((!voiceAction && !approval?.backup) || !approval?.preview) {
       logger(tr(language, "safeguardsMissing"), "error");
       return false;
@@ -97,6 +112,31 @@ export function useAlexa(language = "de") {
         logger(
           tr(language, "requested", { name: deviceName(current[0]), action: actionLabel }),
         );
+        return true;
+      }
+            if (["groupAddMember", "groupRemoveMember"].includes(action)) {
+        if (current.length !== 1 || !current[0]._admGroupId)
+          throw new Error(tr(language, "exactlyOneGroup"));
+        const groupId = current[0]._admGroupId;
+        const endpointIds = approval?.endpointIds || [];
+        if (!endpointIds.length)
+          throw new Error(tr(language, "unsuitable"));
+        const op = action === "groupAddMember" ? "ADD" : "REMOVE";
+        await client.updateGroupMembers(groupId, endpointIds, op);
+        logger(
+          op === "ADD"
+            ? tr(language, "groupMembersAdded", { count: endpointIds.length })
+            : tr(language, "groupMembersRemoved", { count: endpointIds.length }),
+        );
+        publish(await client.load());
+        return true;
+      }
+      if (action === "runRoutine") {
+        if (!approval?.routine)
+          throw new Error(tr(language, "unsuitable"));
+        const target = current.length === 1 ? current[0] : null;
+        await client.runRoutine(approval.routine, target);
+        logger(tr(language, "routineExecuted", { name: approval.routine.name }));
         return true;
       }
       if (["groupCreate", "groupRename"].includes(action)) {
@@ -192,5 +232,8 @@ export function useAlexa(language = "de") {
     fetchDevices,
     execute,
     cancelBatch,
+    routines,
+    routinesBusy,
+    fetchRoutines,
   };
 }

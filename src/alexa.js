@@ -53,7 +53,7 @@ export const canAct = (d, action) =>
       ? !d._admDeleteUnavailable && Boolean(d._admEndpointId || d._admApplianceId)
       : action === "groupCreate"
         ? Boolean(d._admEndpointId) && !isGroup(d)
-        : action === "groupRename"
+        : ["groupRename", "groupAddMember", "groupRemoveMember"].includes(action)
           ? Boolean(d._admGroupId) && isGroup(d)
       : Boolean(d._admEndpointId);
 export function toggleVisible(selected, visible) {
@@ -72,15 +72,23 @@ export function filterDevices(devices, filters) {
     hideProtected = false,
     onlyDeletable = false,
   } = filters;
-  const members = new Set(
-    devices.find((d) => d.id === group)?.providerData?.groupMembers || [],
-  );
+  const targetGroup = devices.find((d) => d.id === group);
+  const members = new Set([
+    ...(targetGroup?.providerData?.groupMembers || []),
+    ...(targetGroup?._admGroupMemberEndpointIds || []),
+  ]);
   return devices.filter((d) => {
     if (hideProtected && (isProtected(d) || !canAct(d, "delete"))) return false;
     if (onlyDeletable && (!canAct(d, "delete") || isProtected(d))) return false;
     if (type && deviceType(d) !== type) return false;
     if (origin && source(d) !== origin) return false;
-    if (group && d.id !== group && !members.has(d.id)) return false;
+    if (
+      group &&
+      d.id !== group &&
+      !members.has(d.id) &&
+      (!d._admEndpointId || !members.has(d._admEndpointId))
+    )
+      return false;
     if (status === "Geschützt" && !isProtected(d) && canAct(d, "delete"))
       return false;
     if (status === "Ohne Endpoint" && d._admEndpointId) return false;
@@ -153,6 +161,9 @@ export const LEGACY_ENDPOINTS_QUERY = `query getLegacyEndpointData {
 }`;
 export const CREATE_GROUP_QUERY = `mutation createDeviceGroup($in: CreateDeviceGroupInput!) {
   createDeviceGroup(createDeviceGroupInput: $in) { __typename }
+}`;
+export const UPDATE_GROUP_QUERY = `mutation updateDeviceGroup($in: UpdateDeviceGroupInput!) {
+  updateDeviceGroup(updateDeviceGroupInput: $in) { __typename }
 }`;
 export const RENAME_ENDPOINT_QUERY = `mutation setEndpointFriendlyName($in: SetEndpointFriendlyNameInput!) {
   setEndpointFriendlyName(input: $in) { __typename }
@@ -473,6 +484,45 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
         throw new Error("Der neue Gruppenname konnte bei der Nachkontrolle nicht bestätigt werden.");
       return verified;
     },
+    async updateGroupMembers(groupId, memberEndpointIds, operation = "ADD") {
+      const op = String(operation || "ADD").toUpperCase();
+      if (!["ADD", "REMOVE"].includes(op))
+        throw new Error("Ungültige Gruppenoperation.");
+      const ids = [...new Set(memberEndpointIds || [])].filter(Boolean);
+      if (!groupId || !ids.length)
+        throw new Error("Gruppe und mindestens ein Geräte-Endpunkt sind erforderlich.");
+      const before = await listGroups();
+      const currentGroup = before.find((group) => group.id === groupId);
+      if (!currentGroup)
+        throw new Error("Die ausgewählte Gruppe wurde nicht mehr gefunden.");
+
+      for (const endpointId of ids) {
+        const body = await gqlVariables(UPDATE_GROUP_QUERY, "updateDeviceGroup", {
+          in: {
+            deviceGroupId: groupId,
+            memberDeviceIds: [endpointId],
+            memberDeviceIdsUpdateOperation: op,
+          },
+        });
+        if (!body?.data?.updateDeviceGroup)
+          throw new Error("Amazon hat die Aktualisierung der Gruppenmitglieder nicht bestätigt.");
+      }
+
+      const groups = await listGroups();
+      const verified = groups.find((group) => group.id === groupId);
+      if (!verified)
+        throw new Error("Die Gruppe konnte bei der Nachkontrolle nicht gefunden werden.");
+
+      const actualIds = new Set(
+        verified.memberDevices?.items?.map((item) => item?.id).filter(Boolean) || [],
+      );
+      if (op === "ADD" && !ids.every((id) => actualIds.has(id)))
+        throw new Error("Nicht alle neuen Gruppenmitglieder wurden von Amazon übernommen.");
+      if (op === "REMOVE" && ids.some((id) => actualIds.has(id)))
+        throw new Error("Nicht alle entfernten Mitglieder wurden von Amazon gelöscht.");
+
+      return verified;
+    },
     async mutate(d, action) {
       if (!canAct(d, action))
         throw new Error("Keine geeignete Ziel-ID vorhanden.");
@@ -636,6 +686,85 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
     },
     async speak(d, text, locale = "de-DE") {
       return this.sendAlexaAction(d, text, "speak", locale);
+    },
+    async listRoutines() {
+      const csrf =
+        typeof document === "undefined"
+          ? ""
+          : document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/i)?.[1] || "";
+      const automations = await request("/api/behaviors/v2/automations", {
+        headers: { csrf },
+      });
+      if (!Array.isArray(automations)) return [];
+      return automations
+        .filter((a) => a && a.status === "ENABLED" && a.name && a.sequence)
+        .map((a) => {
+          let triggerSummary = "";
+          const firstTrigger = a.triggers?.[0];
+          if (firstTrigger) {
+            if (firstTrigger.payload?.utterance) {
+              triggerSummary = `"${firstTrigger.payload.utterance}"`;
+            } else if (firstTrigger.type) {
+              triggerSummary = firstTrigger.type.replace(/^Alexa\./, "");
+            }
+          }
+          return {
+            id: a.automationId || a.name,
+            automationId: a.automationId || null,
+            name: a.name,
+            status: a.status,
+            description: a.description || "",
+            sequence: a.sequence,
+            triggerSummary: triggerSummary || "Manuell / Event",
+            trigger: firstTrigger || null,
+          };
+        });
+    },
+    async runRoutine(routine, targetEchoDevice = null) {
+      if (!routine || !routine.sequence)
+        throw new Error("Ungültige Routine übergeben.");
+      const csrf =
+        typeof document === "undefined"
+          ? ""
+          : document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/i)?.[1] || "";
+      const data = await request("/api/devices-v2/device?cached=true", {
+        headers: { csrf },
+      });
+      let target = null;
+      if (targetEchoDevice) {
+        target = resolveEcho(targetEchoDevice, data?.devices);
+      } else {
+        const echoes = (data?.devices || []).filter(
+          (x) => x.deviceType && x.serialNumber && x.deviceOwnerCustomerId,
+        );
+        if (!echoes.length)
+          throw new Error("Kein geeignetes Echo-Gerät für die Ausführung gefunden.");
+        target = echoes[0];
+      }
+
+      let seqStr = JSON.stringify(routine.sequence);
+      seqStr = seqStr
+        .replace(/ALEXA_CURRENT_DSN/g, target.serialNumber)
+        .replace(/ALEXA_CURRENT_DEVICE_TYPE/g, target.deviceType)
+        .replace(
+          /<\$Trigger\.Alexa\.Trigger\.Alarms\.NotificationStopped\.\$\.payload\.object\.device\.deviceSerialNumber\$>/g,
+          target.serialNumber,
+        )
+        .replace(
+          /<\$Trigger\.Alexa\.Trigger\.Alarms\.NotificationStopped\.\$\.payload\.object\.device\.productId\$>/g,
+          target.deviceType,
+        );
+
+      const parsedSeq = JSON.parse(seqStr);
+      await request("/api/behaviors/preview", {
+        method: "POST",
+        headers: { csrf },
+        body: JSON.stringify({
+          behaviorId: "PREVIEW",
+          status: "ENABLED",
+          sequenceJson: JSON.stringify(parsedSeq),
+        }),
+      });
     },
   };
 }
