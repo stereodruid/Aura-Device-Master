@@ -15,6 +15,8 @@ import {
   attachDeviceGroups,
   canAct,
   enrichEndpointDetails,
+  summarizeRoutineActions,
+  summarizeRoutineTriggers,
 } from "../src/alexa.js";
 
 test("Echo recognition supports top-level types and GraphQL categories", () => {
@@ -405,10 +407,12 @@ test("group membership updates send UpdateDeviceGroupInput one by one and verify
   assert.deepEqual(members, ["ep-2", "ep-3"]);
 });
 
-test("routines can be listed and executed with replaced Echo placeholders", async () => {
+test("routines can be listed (with limit=2000 and disabled routines) and executed with replaced Echo placeholders", async () => {
   let executedPreview = null;
+  let fetchedAutomationsUrl = null;
   const client = createAlexaClient(async (url, options) => {
     if (url.includes("/api/behaviors/v2/automations")) {
+      fetchedAutomationsUrl = url;
       return response([
         {
           automationId: "auto-1",
@@ -432,7 +436,7 @@ test("routines can be listed and executed with replaced Echo placeholders", asyn
           automationId: "auto-2",
           name: "Inaktiv",
           status: "DISABLED",
-          sequence: {},
+          sequence: { startNode: { type: "Alexa.Speak", operationPayload: { textToSpeak: "Aus" } } },
         },
       ]);
     }
@@ -455,9 +459,14 @@ test("routines can be listed and executed with replaced Echo placeholders", asyn
   });
 
   const routines = await client.listRoutines();
-  assert.equal(routines.length, 1);
+  assert.equal(fetchedAutomationsUrl, "/api/behaviors/v2/automations?limit=2000");
+  assert.equal(routines.length, 2);
   assert.equal(routines[0].name, "Guten Morgen");
+  assert.equal(routines[0].status, "ENABLED");
   assert.equal(routines[0].triggerSummary, '"Alexa, guten morgen"');
+  assert.equal(routines[0].raw.automationId, "auto-1");
+  assert.equal(routines[1].name, "Inaktiv");
+  assert.equal(routines[1].status, "DISABLED");
 
   await client.runRoutine(routines[0]);
   assert.ok(executedPreview);
@@ -465,6 +474,51 @@ test("routines can be listed and executed with replaced Echo placeholders", asyn
   const parsedSeq = JSON.parse(executedPreview.sequenceJson);
   assert.equal(parsedSeq.startNode.operationPayload.deviceSerialNumber, "ECHO_SERIAL_123");
   assert.equal(parsedSeq.startNode.operationPayload.deviceType, "ECHO_TYPE_456");
+});
+
+test("routine triggers and nested sequence actions are summarized cleanly", () => {
+  const triggers = summarizeRoutineTriggers([
+    { type: "CustomUtterance", payload: { utterance: "Gute Nacht" } },
+    { type: "ScheduledTime", payload: { schedule: { startTime: "22:30", recurrence: ["MO", "TU"] } } },
+  ]);
+  assert.deepEqual(triggers, ['"Gute Nacht"', "22:30 (MO, TU)"]);
+
+  const steps = summarizeRoutineActions(
+    {
+      "@type": "com.amazon.alexa.behaviors.model.Sequence",
+      startNode: {
+        "@type": "com.amazon.alexa.behaviors.model.SerialNode",
+        nodesToExecute: [
+          {
+            type: "Alexa.Speak",
+            operationPayload: { textToSpeak: "Schlaf gut", deviceSerialNumber: "ALEXA_CURRENT_DSN" },
+          },
+          {
+            "@type": "com.amazon.alexa.behaviors.model.ParallelNode",
+            nodesToExecute: [
+              { type: "Alexa.DeviceControls.Volume", operationPayload: { value: 25, deviceSerialNumber: "SN-1" } },
+              {
+                type: "Alexa.SmartHome.Batch",
+                operationPayload: {
+                  operations: [{ type: "Alexa.SmartHome.TurnOff", target: "ep-lamp" }],
+                },
+              },
+            ],
+          },
+          { type: "Alexa.Wait", operationPayload: { duration: "PT5S" } },
+        ],
+      },
+    },
+    [
+      { id: "d1", displayName: "Wohnzimmer Lampe", _admEndpointId: "ep-lamp" },
+      { id: "d2", displayName: "Schlafzimmer Echo", serialNumber: "SN-1" },
+    ],
+  );
+  assert.equal(steps.length, 4);
+  assert.deepEqual(steps[0], { kind: "speak", label: "Speak", detail: "Schlaf gut", target: "" });
+  assert.deepEqual(steps[1], { kind: "volume", label: "Volume", detail: "25%", target: "Schlafzimmer Echo" });
+  assert.deepEqual(steps[2], { kind: "smarthome", label: "TurnOff", detail: "", target: "Wohnzimmer Lampe" });
+  assert.deepEqual(steps[3], { kind: "wait", label: "Wait", detail: "PT5S", target: "" });
 });
 
 test("behavior availability is preferred and modern reachability is a fallback", () => {

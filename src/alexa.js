@@ -692,31 +692,26 @@ export function createAlexaClient(fetchImpl = (...args) => fetch(...args)) {
         typeof document === "undefined"
           ? ""
           : document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/i)?.[1] || "";
-      const automations = await request("/api/behaviors/v2/automations", {
+      const automations = await request("/api/behaviors/v2/automations?limit=2000", {
         headers: { csrf },
       });
       if (!Array.isArray(automations)) return [];
       return automations
-        .filter((a) => a && a.status === "ENABLED" && a.name && a.sequence)
+        .filter((a) => a && (a.name || a.automationId) && a.sequence)
         .map((a) => {
-          let triggerSummary = "";
-          const firstTrigger = a.triggers?.[0];
-          if (firstTrigger) {
-            if (firstTrigger.payload?.utterance) {
-              triggerSummary = `"${firstTrigger.payload.utterance}"`;
-            } else if (firstTrigger.type) {
-              triggerSummary = firstTrigger.type.replace(/^Alexa\./, "");
-            }
-          }
+          const triggers = Array.isArray(a.triggers) ? a.triggers : [];
+          const triggerLabels = summarizeRoutineTriggers(triggers);
           return {
             id: a.automationId || a.name,
             automationId: a.automationId || null,
-            name: a.name,
-            status: a.status,
+            name: a.name || a.automationId,
+            status: a.status || "UNKNOWN",
             description: a.description || "",
             sequence: a.sequence,
-            triggerSummary: triggerSummary || "Manuell / Event",
-            trigger: firstTrigger || null,
+            triggers,
+            triggerSummary: triggerLabels[0] || "Manuell / Event",
+            trigger: triggers[0] || null,
+            raw: a,
           };
         });
     },
@@ -861,4 +856,138 @@ export async function runBatch(
           ));
   }
   return { results, devices, verified: true, cancelled };
+}
+
+export function summarizeRoutineTriggers(triggers = []) {
+  if (!Array.isArray(triggers)) return [];
+  return triggers
+    .filter(Boolean)
+    .map((trigger) => {
+      const p = trigger.payload || {};
+      if (p.utterance) return `"${p.utterance}"`;
+      if (p.schedule?.startTime) {
+        const days = Array.isArray(p.schedule.recurrence) && p.schedule.recurrence.length
+          ? ` (${p.schedule.recurrence.join(", ")})`
+          : "";
+        return `${p.schedule.startTime}${days}`;
+      }
+      if (p.time) return String(p.time);
+      if (trigger.type) {
+        const cleanType = String(trigger.type).replace(/^Alexa\.(Trigger\.)?/, "");
+        const target = p.target || p.entityId || p.customerId ? (p.target || p.entityId || "") : "";
+        return target ? `${cleanType}: ${target}` : cleanType;
+      }
+      return "Event";
+    });
+}
+
+export function summarizeRoutineActions(sequence, devices = []) {
+  const byId = new Map();
+  for (const d of Array.isArray(devices) ? devices : []) {
+    const label = deviceName(d);
+    for (const key of [
+      d.id,
+      d._admEndpointId,
+      d._admApplianceId,
+      d.serialNumber,
+      d.providerData?.serialNumber,
+    ].filter(Boolean)) {
+      byId.set(key, label);
+    }
+  }
+  const resolveTarget = (value) => {
+    if (!value) return "";
+    if (typeof value === "string") {
+      if (value.startsWith("ALEXA_CURRENT_") || value.startsWith("<$Trigger.")) return "";
+      return byId.get(value) || value;
+    }
+    if (typeof value === "object") {
+      const direct = value.entityId || value.endpointId || value.deviceSerialNumber;
+      if (direct) return resolveTarget(direct);
+      if (Array.isArray(value.devices) && value.devices.length) {
+        return value.devices
+          .map((item) => resolveTarget(item?.deviceSerialNumber || item?.entityId || item?.endpointId))
+          .filter(Boolean)
+          .join(", ");
+      }
+    }
+    return "";
+  };
+
+  const steps = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node.nodesToExecute)) {
+      for (const child of node.nodesToExecute) walk(child);
+      return;
+    }
+    const type = String(node.type || "");
+    const p = node.operationPayload && typeof node.operationPayload === "object"
+      ? node.operationPayload
+      : {};
+    const target = resolveTarget(p.target) || resolveTarget(p.deviceSerialNumber);
+
+    if (type === "Alexa.Speak" || type === "Alexa.SynthesizeSpeech") {
+      steps.push({ kind: "speak", label: "Speak", detail: p.textToSpeak || "", target });
+      return;
+    }
+    if (type.includes("Announcement")) {
+      const content = Array.isArray(p.content) ? p.content[0] : null;
+      const text = content?.speak?.value || content?.display?.body || p.textToSpeak || "";
+      steps.push({ kind: "announce", label: "Announcement", detail: text, target });
+      return;
+    }
+    if (type === "Alexa.TextCommand") {
+      steps.push({ kind: "command", label: "Voice command", detail: p.text || "", target });
+      return;
+    }
+    if (type === "Alexa.DeviceControls.Volume") {
+      steps.push({
+        kind: "volume",
+        label: "Volume",
+        detail: p.value != null ? `${p.value}%` : "",
+        target,
+      });
+      return;
+    }
+    if (type === "Alexa.Wait" || node["@type"]?.endsWith("WaitNode")) {
+      const dur = p.duration || node.duration || (p.durationInSeconds != null ? `${p.durationInSeconds}s` : "");
+      steps.push({ kind: "wait", label: "Wait", detail: String(dur || ""), target: "" });
+      return;
+    }
+    if (type === "Alexa.Music.PlaySearchPhrase") {
+      steps.push({
+        kind: "music",
+        label: "Music",
+        detail: [p.searchPhrase, p.musicProviderId].filter(Boolean).join(" · "),
+        target,
+      });
+      return;
+    }
+    if (type === "Alexa.SmartHome.Batch" && Array.isArray(p.operations)) {
+      for (const op of p.operations) {
+        const opTarget = resolveTarget(op?.target) || target;
+        const opType = String(op?.type || "SmartHome").replace(/^Alexa\.SmartHome\./, "");
+        const val = op?.value != null ? String(op.value) : op?.powerState || "";
+        steps.push({ kind: "smarthome", label: opType, detail: val, target: opTarget });
+      }
+      return;
+    }
+    if (type) {
+      const cleanLabel = type.replace(/^Alexa\.(SmartHome\.)?/, "");
+      const detail =
+        p.textToSpeak ||
+        p.text ||
+        p.searchPhrase ||
+        p.soundStringId ||
+        p.powerState ||
+        (p.value != null && typeof p.value !== "object" ? String(p.value) : "");
+      steps.push({ kind: "other", label: cleanLabel, detail, target });
+    }
+  };
+
+  if (sequence && typeof sequence === "object") {
+    walk(sequence.startNode || sequence);
+  }
+  return steps;
 }

@@ -83,6 +83,8 @@ import {
   canAct,
   filterDevices,
   toggleVisible,
+  summarizeRoutineActions,
+  summarizeRoutineTriggers,
 } from "./alexa";
 
 const defaultColumns = [
@@ -314,8 +316,10 @@ export default function App() {
     routinesBusy,
     fetchRoutines,
   } = useAlexa(language);
-    const [activeView, setActiveView] = useState("devices");
+  const [activeView, setActiveView] = useState("devices");
   const [routineSearch, setRoutineSearch] = useState("");
+  const [routineStatusFilter, setRoutineStatusFilter] = useState("ALL");
+  const [selectedRoutineId, setSelectedRoutineId] = useState(null);
   const [selectedDeviceToAdd, setSelectedDeviceToAdd] = useState("");
   const [filters, setFilters] = useState({
     ...emptyFilters,
@@ -495,6 +499,38 @@ export default function App() {
       logger(t("backupFailed"));
     }
   }
+  function exportRoutinesJson(targetRoutine = null) {
+    try {
+      const payload = targetRoutine
+        ? targetRoutine.raw || targetRoutine
+        : routines.map((r) => r.raw || r);
+      const url = URL.createObjectURL(
+        new Blob([JSON.stringify(payload, null, 2)], {
+          type: "application/json",
+        }),
+      );
+      const a = document.createElement("a");
+      a.href = url;
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const slug = targetRoutine
+        ? String(targetRoutine.name || targetRoutine.id)
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "")
+            .slice(0, 40)
+        : "";
+      a.download = targetRoutine
+        ? `alexa-routine-${slug || "item"}-${stamp}.json`
+        : `alexa-routines-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      logger(t("routinesBackupStarted"));
+    } catch {
+      logger(t("backupFailed"));
+    }
+  }
   function preview(action, list = checked, extra = {}) {
     if (busy || !ready) return;
     if (!list.length && action !== "runRoutine") return;
@@ -562,15 +598,32 @@ export default function App() {
     setFilters((prev) => ({ ...prev, [key]: value }));
   
   const filteredRoutines = useMemo(() => {
-    if (!routineSearch.trim()) return routines;
-    const q = routineSearch.toLowerCase();
-    return routines.filter(
-      (r) =>
+    const q = routineSearch.trim().toLowerCase();
+    return routines.filter((r) => {
+      if (routineStatusFilter === "ENABLED" && r.status !== "ENABLED") return false;
+      if (routineStatusFilter === "DISABLED" && r.status === "ENABLED") return false;
+      if (!q) return true;
+      return (
         r.name?.toLowerCase().includes(q) ||
         r.description?.toLowerCase().includes(q) ||
-        r.triggerSummary?.toLowerCase().includes(q),
-    );
-  }, [routines, routineSearch]);
+        r.triggerSummary?.toLowerCase().includes(q) ||
+        r.automationId?.toLowerCase().includes(q)
+      );
+    });
+  }, [routines, routineSearch, routineStatusFilter]);
+
+  const selectedRoutine = useMemo(
+    () => routines.find((r) => r.id === selectedRoutineId) || null,
+    [routines, selectedRoutineId],
+  );
+  const selectedRoutineTriggers = useMemo(
+    () => (selectedRoutine ? summarizeRoutineTriggers(selectedRoutine.triggers || []) : []),
+    [selectedRoutine],
+  );
+  const selectedRoutineSteps = useMemo(
+    () => (selectedRoutine ? summarizeRoutineActions(selectedRoutine.sequence, devices) : []),
+    [selectedRoutine, devices],
+  );
 
   const blocked = busy || !ready;
   const columnLabels = Object.fromEntries(defaultColumns.map((key) => [key, t(key)]));
@@ -1159,14 +1212,31 @@ export default function App() {
                 onChange={(e) => setRoutineSearch(e.target.value)}
               />
             </div>
-            <button
-              className="primary"
-              disabled={routinesBusy || busy}
-              onClick={fetchRoutines}
-            >
-              <RefreshCw size={16} className={routinesBusy ? "spin" : ""} />
-              {routinesBusy ? t("waiting") : t("reload")}
-            </button>
+            <div className="toolbar">
+              <select
+                aria-label={t("statusFilter")}
+                value={routineStatusFilter}
+                onChange={(e) => setRoutineStatusFilter(e.target.value)}
+              >
+                <option value="ALL">{t("allStatuses")}</option>
+                <option value="ENABLED">{t("enabled")}</option>
+                <option value="DISABLED">{t("disabled")}</option>
+              </select>
+              <button
+                disabled={!routines.length}
+                onClick={() => exportRoutinesJson(null)}
+              >
+                <Download size={16} /> {t("exportRoutinesJson")}
+              </button>
+              <button
+                className="primary"
+                disabled={routinesBusy || busy}
+                onClick={fetchRoutines}
+              >
+                <RefreshCw size={16} className={routinesBusy ? "spin" : ""} />
+                {routinesBusy ? t("waiting") : t("reload")}
+              </button>
+            </div>
           </div>
           <div className="table-scroll" style={{ flex: 1, overflowY: "auto" }}>
             <table>
@@ -1181,12 +1251,19 @@ export default function App() {
               </thead>
               <tbody>
                 {filteredRoutines.map((routine) => (
-                  <tr key={routine.id}>
+                  <tr
+                    key={routine.id}
+                    className={selectedRoutine?.id === routine.id ? "selected" : ""}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => setSelectedRoutineId(routine.id)}
+                  >
                     <td>
                       <strong>{routine.name}</strong>
                     </td>
                     <td>
-                      <span className="status-online">{t("enabled")}</span>
+                      <span className={routine.status === "ENABLED" ? "status-online" : "muted"}>
+                        {routine.status === "ENABLED" ? t("enabled") : t("disabled")}
+                      </span>
                     </td>
                     <td>
                       <span className="routine-trigger-tag">{routine.triggerSummary}</span>
@@ -1198,7 +1275,8 @@ export default function App() {
                       <button
                         className="primary"
                         disabled={blocked}
-                        onClick={() => {
+                        onClick={(e) => {
+                          e.stopPropagation();
                           const firstEcho = devices.find(isEcho);
                           preview("runRoutine", firstEcho ? [firstEcho] : [], { routine });
                         }}
@@ -1220,27 +1298,110 @@ export default function App() {
           </div>
         </section>
         <aside className="panel sidebar">
-          <div className="detail-heading">
-            <span className="device-art" role="img" aria-label={t("routines")}>
-              <Layers size={48} strokeWidth={1.5} />
-            </span>
-            <div>
-              <h2>{t("routines")}</h2>
+          {selectedRoutine ? (
+            <>
+              <div className="detail-heading">
+                <span className="device-art" role="img" aria-label={t("routines")}>
+                  <Layers size={48} strokeWidth={1.5} />
+                </span>
+                <div>
+                  <h2>{selectedRoutine.name}</h2>
+                  <p className="muted">
+                    {selectedRoutine.description || t("noDescription")}
+                  </p>
+                </div>
+              </div>
+              <div className="detail-toolbar" aria-label={t("actions")}>
+                <button
+                  title={t("exportRoutineJson")}
+                  aria-label={t("exportRoutineJson")}
+                  onClick={() => exportRoutinesJson(selectedRoutine)}
+                >
+                  <Download size={20} />
+                </button>
+                <button
+                  className="on-icon"
+                  title={t("runRoutine")}
+                  aria-label={t("runRoutine")}
+                  disabled={blocked}
+                  onClick={() => {
+                    const firstEcho = devices.find(isEcho);
+                    preview("runRoutine", firstEcho ? [firstEcho] : [], { routine: selectedRoutine });
+                  }}
+                >
+                  <Play size={20} />
+                </button>
+              </div>
+              <dl className="detail-grid">
+                <dt>{t("status")}</dt>
+                <dd className={selectedRoutine.status === "ENABLED" ? "status-online" : "muted"}>
+                  {selectedRoutine.status === "ENABLED" ? t("enabled") : t("disabled")}
+                </dd>
+                <dt>{t("routineId")}</dt>
+                <dd className="detail-id" title={selectedRoutine.automationId || selectedRoutine.id}>
+                  {selectedRoutine.automationId || selectedRoutine.id}
+                </dd>
+                <dt>{t("routineTriggers")}</dt>
+                <dd>{selectedRoutineTriggers.length}</dd>
+                <dt>{t("routineActions")}</dt>
+                <dd>{selectedRoutineSteps.length}</dd>
+              </dl>
+              <div className="group-members-panel routine-details-panel">
+                <div className="group-members-header">
+                  <span>{t("routineTriggers")} ({selectedRoutineTriggers.length})</span>
+                </div>
+                {!selectedRoutineTriggers.length ? (
+                  <p className="muted small" style={{ margin: "2px 0" }}>{t("noRoutineTriggers")}</p>
+                ) : (
+                  <ul className="group-members-list routine-detail-list">
+                    {selectedRoutineTriggers.map((trig, idx) => (
+                      <li key={idx} className="group-member-item">
+                        <span className="group-member-name" title={trig}>{trig}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="group-members-header" style={{ marginTop: "4px" }}>
+                  <span>{t("routineSteps")} ({selectedRoutineSteps.length})</span>
+                </div>
+                {!selectedRoutineSteps.length ? (
+                  <p className="muted small" style={{ margin: "2px 0" }}>{t("noRoutineSteps")}</p>
+                ) : (
+                  <ol className="group-members-list routine-steps-list">
+                    {selectedRoutineSteps.map((step, idx) => (
+                      <li key={idx} className="group-member-item routine-step-item">
+                        <span className="routine-step-index">{idx + 1}.</span>
+                        <div className="routine-step-copy">
+                          <strong>{step.label}</strong>
+                          {step.detail && <span className="routine-step-detail" title={step.detail}>: {step.detail}</span>}
+                          {step.target && <span className="muted routine-step-target" title={step.target}> ({step.target})</span>}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="empty">
+              <Layers size={36} />
+              <h2>{t("chooseRoutine")}</h2>
+              <p>{t("chooseRoutineHint")}</p>
               <p className="muted">{t("routinesCount", { count: routines.length })}</p>
             </div>
-          </div>
-          <div className="log" aria-label={t("activityLog")}>
+          )}
+          <section className="log">
             <h3>
-              <Terminal size={14} /> {t("activityLog")}
+              <Terminal size={15} /> CLI Terminal
             </h3>
-            <div ref={logRef}>
+            <div ref={logRef} role="log" aria-label={t("activityLog")}>
               {logs.map((entry, index) => (
                 <p key={index} className={entry.level === "error" ? "log-error" : ""}>
                   {entry.text}
                 </p>
               ))}
             </div>
-          </div>
+          </section>
         </aside>
       </main>
       )}

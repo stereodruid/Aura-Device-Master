@@ -837,3 +837,30 @@
   color: #67c9ff;
   font-size: 11px;
 }
+#aura-root .routine-details-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+#aura-root .routine-detail-list {
+  max-height: 70px;
+}
+#aura-root .routine-steps-list {
+  max-height: 170px;
+}
+#aura-root .routine-step-item {
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 6px;
+}
+#aura-root .routine-step-index {
+  color: #67c9ff;
+  font-weight: 600;
+  flex: none;
+}
+#aura-root .routine-step-copy {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+  line-height: 1.35;
+}
