@@ -1589,6 +1589,24 @@ export default function App() {
                   <p className="muted" style={{ margin: 0 }}>
                     {t("group")}: <strong>{deviceName(plan.list[0])}</strong>
                   </p>
+                  {plan.list[0] && isProtected(plan.list[0]) && (
+                    <label style={{ display: "block", marginTop: "8px" }}>
+                      <input
+                        type="checkbox"
+                        checked={protectedIds.has(plan.list[0].id)}
+                        onChange={(e) =>
+                          setProtectedIds((prev) => {
+                            const next = new Set(prev);
+                            e.target.checked
+                              ? next.add(plan.list[0].id)
+                              : next.delete(plan.list[0].id);
+                            return next;
+                          })
+                        }
+                      />{" "}
+                      {t("allowProtected")}
+                    </label>
+                  )}
                 </div>
               ) : (
                 plan.list.slice(0, 100).map((d) => (
