@@ -315,6 +315,10 @@ test("groups are attached by a unique name and use explicit group IDs", () => {
   assert.equal(attached._admGroupId, "amzn1.alexa.endpointGroup.room");
   assert.deepEqual(attached._admGroupMemberEndpointIds, ["ep-1"]);
   assert.equal(canAct(attached, "groupRename"), true);
+  assert.equal(canAct(attached, "groupAddMember"), true);
+  assert.equal(canAct(attached, "groupRemoveMember"), true);
+  // Groups are always protected, so add/remove/rename previews must offer allowProtected.
+  assert.equal(isProtected(attached), true);
 });
 test("group creation and rename send modern GraphQL inputs and verify by reread", async () => {
   const sent = [];
